@@ -1,0 +1,70 @@
+# Alerts about the platform itself, not about security events.
+#
+# The distinction matters: a SIEM that is down produces no alerts, which looks exactly like a
+# quiet night. These rules are what tell you the difference.
+
+groups:
+  - name: bloodhound-pipeline
+    interval: 30s
+    rules:
+
+      - alert: IngestionStopped
+        expr: rate(bloodhound_events_ingested_total[5m]) == 0
+        for: 3m
+        labels:
+          severity: critical
+        annotations:
+          summary: "No events ingested for 3 minutes"
+          description: >
+            The pipeline has stopped. Silence from a detection platform is indistinguishable from
+            an absence of attacks, which is why this is critical rather than a warning.
+
+      - alert: ConsumerLagGrowing
+        expr: kafka_consumer_fetch_manager_records_lag_max > 10000
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Consumer lag above 10k records"
+          description: "Detections are operating on stale data; alerts will be late."
+
+      - alert: DeadLetterBacklog
+        expr: increase(bloodhound_deadletters_published_total[15m]) > 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Events are being dead-lettered"
+          description: >
+            Something is producing events this pipeline cannot process. An attacker who can make
+            the parser fail has found a way to become invisible — treat a sudden backlog as
+            potentially adversarial, not merely as a bug.
+
+      - alert: DetectorNotRunning
+        expr: up{service="detector"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "The detection engine is down"
+
+      - alert: ResponseActionFailing
+        expr: increase(bloodhound_response_failed_total[10m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "A containment action failed"
+          description: >
+            Someone believes an account is contained and it is not. Failed containment is worse
+            than no containment because it is believed.
+
+      - alert: SearchIndexingDegraded
+        expr: increase(bloodhound_search_failed_total[10m]) > 100
+        for: 5m
+        labels:
+          severity: info
+        annotations:
+          summary: "OpenSearch indexing is failing"
+          description: >
+            Investigation search is degraded. Ingestion is unaffected — Postgres remains the
+            system of record and the index can be rebuilt from it.

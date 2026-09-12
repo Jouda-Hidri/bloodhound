@@ -1,0 +1,26 @@
+global:
+  scrape_interval: 10s
+  evaluation_interval: 15s
+
+rule_files:
+  - /etc/prometheus/alert-rules.yml
+
+scrape_configs:
+  # The four services run on the host (via `make producer` etc.), not in Docker, so Prometheus
+  # reaches them through host.docker.internal. On Linux this resolves via the extra_hosts entry
+  # in docker-compose.yml; on macOS Docker Desktop provides it.
+  - job_name: bloodhound
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ['host.docker.internal:8101']
+        labels: {service: producer}
+      - targets: ['host.docker.internal:8102']
+        labels: {service: consumer}
+      - targets: ['host.docker.internal:8103']
+        labels: {service: detector}
+      - targets: ['host.docker.internal:8104']
+        labels: {service: responder}
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ['localhost:9090']

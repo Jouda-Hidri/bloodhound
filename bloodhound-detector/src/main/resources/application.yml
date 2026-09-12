@@ -1,0 +1,64 @@
+spring:
+  application:
+    name: bloodhound-detector
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:19092}
+    streams:
+      application-id: bloodhound-detector
+      # Changing this resets all state stores and reprocesses from the start of the topic.
+      # Useful when rules change in ways that make accumulated state meaningless.
+      state-dir: ${STREAMS_STATE_DIR:./target/kafka-streams}
+      properties:
+        # Emit on every aggregate update rather than buffering. This is what lets an alert fire
+        # the moment a threshold is crossed instead of when the window closes — the difference
+        # between detection and an after-action report.
+        statestore.cache.max.bytes: 0
+        commit.interval.ms: 1000
+
+        # One thread per partition of the input topic.
+        num.stream.threads: 3
+
+        # at_least_once, not exactly_once_v2. An alert delivered twice is deduplicated downstream
+        # by the responder; the throughput and latency cost of transactional processing buys
+        # nothing here. Revisit if a detection ever needs to count something the dedupe key
+        # cannot make idempotent.
+        processing.guarantee: at_least_once
+
+        # Last line of defence. The serde already returns null for bad bytes and the topology
+        # filters those out, so this should never trigger — but a deserialisation error that
+        # escapes both would otherwise kill the stream thread and silently stop all detection.
+        default.deserialization.exception.handler: org.apache.kafka.streams.errors.LogAndContinueExceptionHandler
+
+        # Tolerate a broker restart rather than shutting the topology down.
+        retries: 10
+        retry.backoff.ms: 1000
+
+server:
+  port: 8103
+
+bloodhound:
+  detector:
+    # Point this at a directory of YAML files to add rules without rebuilding.
+    rules-dir: ${RULES_DIR:}
+    impossible-travel:
+      enabled: true
+      max-plausible-gap: PT1H
+      state-retention: P2D
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      show-details: always
+  metrics:
+    tags:
+      application: bloodhound-detector
+
+logging:
+  level:
+    io.bloodhound: INFO
+    org.apache.kafka: WARN
+    org.apache.kafka.streams: INFO

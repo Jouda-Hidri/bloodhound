@@ -1,0 +1,28 @@
+id: privilege-escalation-probing
+name: Authorization denials suggesting privilege probing
+description: >
+  An authenticated principal repeatedly asking for things it is not allowed to have. Normal users
+  hit the occasional denial; they do not hit eight in ten minutes across different scopes.
+
+  This is a post-compromise signal — it fires on an account that has already authenticated
+  successfully, which is exactly why credential-focused detections miss the activity it catches.
+severity: medium
+technique: T1068
+enabled: true
+
+match:
+  event.action: permission-check
+  event.outcome: failure
+
+group_by: user.id
+entity_type: user
+
+window: PT10M
+grace: PT2M
+threshold: 8
+
+context_fields:
+  - source.ip
+  - source.geo.country_iso_code
+  - event.reason
+  - user_agent.original

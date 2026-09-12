@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://bloodhound.lab/schema/security-event.json",
+  "title": "SecurityEvent",
+  "description": "ECS-shaped security event. The contract between producers and every downstream consumer.",
+  "type": "object",
+  "required": ["@timestamp", "event", "user"],
+
+  "additionalProperties": false,
+
+  "properties": {
+    "@timestamp": {
+      "type": "string",
+      "description": "Event time (when it happened), ISO-8601. Not ingest time."
+    },
+    "event": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "action", "outcome"],
+      "properties": {
+        "id": {"type": "string", "description": "Deduplication key. Stable for the life of the event."},
+        "category": {"type": "string"},
+        "action": {"type": "string"},
+        "outcome": {"type": "string", "enum": ["success", "failure", "unknown"]},
+        "reason": {"type": "string"}
+      }
+    },
+    "user": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id"],
+      "properties": {
+        "id": {"type": "string"},
+        "name": {"type": "string"},
+        "domain": {"type": "string"}
+      }
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "ip": {"type": "string"},
+        "port": {"type": "integer"},
+        "geo": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "country_iso_code": {"type": "string"},
+            "city_name": {"type": "string"}
+          }
+        }
+      }
+    },
+    "service": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": {"type": "string"},
+        "version": {"type": "string"},
+        "environment": {"type": "string"}
+      }
+    },
+    "user_agent": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "original": {"type": "string"}
+      }
+    },
+    "labels": {
+      "type": "object",
+      "description": "Simulation ground truth. Detections must never read this. A free-form string map, so this one object stays open by design.",
+      "additionalProperties": {"type": "string"}
+    }
+  }
+}

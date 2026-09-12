@@ -1,0 +1,56 @@
+spring:
+  application:
+    name: bloodhound-producer
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:19092}
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+      # acks=all + idempotence: the broker will not silently lose or duplicate a write on retry.
+      # Security telemetry you cannot trust is worse than no telemetry.
+      acks: all
+      properties:
+        enable.idempotence: true
+        max.in.flight.requests.per.connection: 5
+        linger.ms: 20
+        compression.type: lz4
+
+server:
+  port: 8101
+
+bloodhound:
+  schema-registry:
+    enabled: true
+    url: ${SCHEMA_REGISTRY_URL:http://localhost:18085}
+    # Backward: an older consumer must still be able to read what a newer producer writes.
+    # The producer refuses to start if its schema breaks this. That is the point.
+    compatibility: BACKWARD
+  sim:
+    enabled: true
+    user-count: 200
+    events-per-second: 20
+    baseline-failure-rate: 0.06
+    seed: 1337
+    service-name: payment-api
+    environment: lab
+    adversary:
+      # Off by default: a fresh clone produces clean traffic until you ask for attacks.
+      # Turn on with: make adversary-on
+      enabled: false
+      intensity: 0.25
+      tick-millis: 20000
+      scenarios: []   # empty = all of them
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  metrics:
+    tags:
+      application: bloodhound-producer
+
+logging:
+  level:
+    io.bloodhound: INFO
+    org.apache.kafka: WARN

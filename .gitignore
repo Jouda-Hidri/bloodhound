@@ -1,0 +1,31 @@
+# Build output
+target/
+*.class
+
+# Maven wrapper: the script and properties are committed so the build is reproducible
+# on a machine with no Maven installed. The downloaded distribution is not.
+!.mvn/wrapper/maven-wrapper.properties
+.mvn/wrapper/maven-wrapper.jar
+.mvn/wrapper/*.bak
+
+# Kafka Streams local state. Rebuilt from the topics on startup; never worth committing,
+# and stale state from an older topology is actively harmful.
+**/kafka-streams/
+
+# Python
+analytics/.venv/
+__pycache__/
+*.py[cod]
+
+# Logs and local env
+*.log
+.env
+
+# Editors and OS
+.idea/
+*.iml
+.vscode/
+.DS_Store
+
+# Local tool permissions, specific to one machine
+.claude/settings.local.json

@@ -1,0 +1,27 @@
+id: api-key-burst
+name: Long-lived API key used at machine speed
+description: >
+  A burst of API key usage far above what an interactive client produces. Leaked keys are
+  typically found by scraping a repository or a log, then exercised hard and immediately.
+
+  Deliberately only MEDIUM: legitimate batch jobs look identical. This is a rule that earns its
+  keep as a risk-score contributor rather than as a standalone alert, and tuning it in isolation
+  would mean either missing real abuse or paging someone every time a nightly job runs.
+severity: medium
+technique: T1552.001
+enabled: true
+
+match:
+  event.action: api-key-used
+
+group_by: user.id
+entity_type: user
+
+window: PT5M
+grace: PT1M
+threshold: 40
+
+context_fields:
+  - source.ip
+  - source.geo.country_iso_code
+  - user_agent.original

@@ -1,0 +1,28 @@
+id: brute-force-single-account
+name: Brute force against a single account
+description: >
+  Repeated failed logins against one account in a short window. The classic password-guessing
+  signal. Tuned above the ~6% baseline failure rate of the simulated population, so ordinary
+  fat-fingering does not reach it.
+severity: high
+technique: T1110.001
+enabled: true
+
+match:
+  event.action: user-login
+  event.outcome: failure
+
+group_by: user.id
+entity_type: user
+
+window: PT5M
+grace: PT1M
+threshold: 10
+
+# Carried into the alert so triage does not need a round trip to the event store. The source and
+# user agent are usually enough to tell a stuck mobile client from an actual attack.
+context_fields:
+  - source.ip
+  - source.geo.country_iso_code
+  - user_agent.original
+  - event.reason

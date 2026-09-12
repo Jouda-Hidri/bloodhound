@@ -1,0 +1,83 @@
+spring:
+  application:
+    name: bloodhound-responder
+  datasource:
+    url: ${POSTGRES_URL:jdbc:postgresql://localhost:5433/bloodhound}
+    username: ${POSTGRES_USER:bloodhound}
+    password: ${POSTGRES_PASSWORD:bloodhound}
+    hikari:
+      maximum-pool-size: 10
+      # Flyway creates these tables in `detections`, but JDBC connections default to a search_path
+      # of `public` — so unqualified SQL would not find them. Setting it per connection (rather
+      # than in the URL) keeps it correct even when POSTGRES_URL is overridden.
+      # `public` stays on the path so this service can still read raw_events for context.
+      connection-init-sql: "set search_path to detections, public"
+  flyway:
+    enabled: true
+    # Own schema, own history table. The consumer owns `public`; sharing one schema between two
+    # services that both migrate is a race with no winner.
+    schemas: detections
+    default-schema: detections
+    create-schemas: true
+    locations: classpath:db/migration
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:19092}
+    consumer:
+      group-id: bloodhound-responder
+      auto-offset-reset: earliest
+      enable-auto-commit: false
+      max-poll-records: 100
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+      acks: all
+
+server:
+  port: 8104
+
+bloodhound:
+  responder:
+    group-id: bloodhound-responder
+    alerts:
+      # Repeats of the same rule/entity fold into one alert for this long.
+      suppression-window: PT30M
+      sweep-millis: 60000
+    risk:
+      half-life: PT6H
+      incident-threshold: 50
+      containment-threshold: 90
+      max-score: 300
+    response:
+      enabled: true
+      # Unattended containment is off by default, and that default is a security decision:
+      # automation that locks accounts is a denial-of-service primitive if it can be triggered
+      # on demand. Turn it on only once you have measured your false positive rate.
+      auto-execute: false
+      auto-execute-min-severity: high
+      iam-url: ${IAM_URL:http://localhost:8101}
+      iam-timeout-seconds: 5
+      always-require-approval:
+        disable_account: true
+    auth:
+      enabled: true
+      keys:
+        bh-viewer-key: VIEWER
+        bh-analyst-key: ANALYST
+        bh-responder-key: RESPONDER
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      show-details: always
+  metrics:
+    tags:
+      application: bloodhound-responder
+
+logging:
+  level:
+    io.bloodhound: INFO
+    org.apache.kafka: WARN

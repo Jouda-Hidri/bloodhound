@@ -1,0 +1,30 @@
+id: distributed-brute-force
+name: Distributed brute force against one account
+description: >
+  One account, failing logins, from many different source addresses. An attacker spreading
+  attempts across a proxy pool specifically to stay under per-IP rate limits.
+
+  Note the inversion relative to brute-force-single-account: that rule counts events, this one
+  counts distinct sources. An attacker who defeats the first by staying slow per IP walks
+  straight into this one.
+severity: high
+technique: T1110.001
+enabled: true
+
+match:
+  event.action: user-login
+  event.outcome: failure
+
+group_by: user.id
+entity_type: user
+
+window: PT15M
+grace: PT2M
+
+# Count distinct source addresses, not events.
+distinct: source.ip
+threshold: 5
+
+context_fields:
+  - source.geo.country_iso_code
+  - user_agent.original

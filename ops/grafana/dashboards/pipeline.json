@@ -1,0 +1,113 @@
+{
+  "uid": "bloodhound-pipeline",
+  "title": "Bloodhound — Pipeline Health",
+  "tags": ["bloodhound"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "10s",
+  "time": {"from": "now-30m", "to": "now"},
+  "panels": [
+    {
+      "type": "stat",
+      "title": "Events ingested/sec",
+      "gridPos": {"h": 4, "w": 6, "x": 0, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"expr": "sum(rate(bloodhound_events_ingested_total[1m]))", "legendFormat": "ingested"}],
+      "fieldConfig": {"defaults": {"unit": "reqps", "decimals": 1}}
+    },
+    {
+      "type": "stat",
+      "title": "Events published/sec",
+      "gridPos": {"h": 4, "w": 6, "x": 6, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"expr": "sum(rate(kafka_producer_record_send_total[1m]))", "legendFormat": "published"}],
+      "fieldConfig": {"defaults": {"unit": "reqps", "decimals": 1}}
+    },
+    {
+      "type": "stat",
+      "title": "Dead letters (15m)",
+      "description": "Should be zero. Anything else means events are being lost to a parse or persist failure.",
+      "gridPos": {"h": 4, "w": 6, "x": 12, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"expr": "sum(increase(bloodhound_deadletters_published_total[15m]))"}],
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "thresholds": {"mode": "absolute", "steps": [
+            {"color": "green", "value": null},
+            {"color": "red", "value": 1}
+          ]}
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Duplicates absorbed (15m)",
+      "description": "Replays deduplicated by the primary key. Non-zero after a restart is correct.",
+      "gridPos": {"h": 4, "w": 6, "x": 18, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"expr": "sum(increase(bloodhound_events_duplicates_total[15m]))"}],
+      "fieldConfig": {"defaults": {"decimals": 0}}
+    },
+    {
+      "type": "timeseries",
+      "title": "Ingest throughput",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 4},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"expr": "sum(rate(bloodhound_events_ingested_total[1m]))", "legendFormat": "ingested"},
+        {"expr": "sum(rate(bloodhound_events_rejected_total[1m]))", "legendFormat": "rejected"},
+        {"expr": "sum(rate(bloodhound_events_duplicates_total[1m]))", "legendFormat": "duplicates"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "reqps", "custom": {"fillOpacity": 10}}}
+    },
+    {
+      "type": "timeseries",
+      "title": "Ingest batch latency",
+      "description": "Time to parse and persist one Kafka batch. p99 is what matters; the mean hides the stalls.",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 4},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"expr": "histogram_quantile(0.50, sum(rate(bloodhound_ingest_batch_seconds_bucket[5m])) by (le))", "legendFormat": "p50"},
+        {"expr": "histogram_quantile(0.95, sum(rate(bloodhound_ingest_batch_seconds_bucket[5m])) by (le))", "legendFormat": "p95"},
+        {"expr": "histogram_quantile(0.99, sum(rate(bloodhound_ingest_batch_seconds_bucket[5m])) by (le))", "legendFormat": "p99"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "s"}}
+    },
+    {
+      "type": "timeseries",
+      "title": "Consumer lag",
+      "description": "The single most important pipeline number. Growing lag means detections are running on stale data.",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 12},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"expr": "max(kafka_consumer_fetch_manager_records_lag_max) by (service)", "legendFormat": "{{service}}"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "short"}}
+    },
+    {
+      "type": "timeseries",
+      "title": "JVM heap by service",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 12},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"expr": "sum(jvm_memory_used_bytes{area=\"heap\"}) by (service)", "legendFormat": "{{service}}"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "bytes"}}
+    },
+    {
+      "type": "timeseries",
+      "title": "Search indexing",
+      "description": "Derived index only — failures here do not affect ingestion.",
+      "gridPos": {"h": 6, "w": 24, "x": 0, "y": 20},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"expr": "sum(rate(bloodhound_search_indexed_total[1m]))", "legendFormat": "indexed"},
+        {"expr": "sum(rate(bloodhound_search_failed_total[1m]))", "legendFormat": "failed"},
+        {"expr": "sum(rate(bloodhound_search_dropped_total[1m]))", "legendFormat": "dropped (saturated)"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "reqps"}}
+    }
+  ]
+}

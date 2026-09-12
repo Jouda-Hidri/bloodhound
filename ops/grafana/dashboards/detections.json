@@ -1,0 +1,107 @@
+{
+  "uid": "bloodhound-detections",
+  "title": "Bloodhound — Detections & Response",
+  "tags": ["bloodhound", "security"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "10s",
+  "time": {"from": "now-3h", "to": "now"},
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "Alerts fired by rule",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"expr": "sum(rate(bloodhound_detector_alerts_total[5m])) by (rule)", "legendFormat": "{{rule}}"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "reqps", "custom": {"fillOpacity": 20, "stacking": {"mode": "normal"}}}}
+    },
+    {
+      "type": "piechart",
+      "title": "Alert share by rule (3h)",
+      "description": "One rule dominating is the classic sign of a threshold set too low.",
+      "gridPos": {"h": 8, "w": 6, "x": 12, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"expr": "sum(increase(bloodhound_detector_alerts_total[3h])) by (rule)", "legendFormat": "{{rule}}"}
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Incidents opened (3h)",
+      "gridPos": {"h": 4, "w": 3, "x": 18, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"expr": "sum(increase(bloodhound_incidents_opened_total[3h]))"}],
+      "fieldConfig": {"defaults": {"decimals": 0}}
+    },
+    {
+      "type": "stat",
+      "title": "Alerts deduplicated (3h)",
+      "description": "Repeat firings folded into existing alerts. High is good — it is the noise you are not seeing.",
+      "gridPos": {"h": 4, "w": 3, "x": 21, "y": 0},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"expr": "sum(increase(bloodhound_alerts_deduplicated_total[3h]))"}],
+      "fieldConfig": {"defaults": {"decimals": 0}}
+    },
+    {
+      "type": "table",
+      "title": "Open alerts",
+      "gridPos": {"h": 9, "w": 12, "x": 0, "y": 8},
+      "datasource": {"type": "postgres", "uid": "bloodhound-postgres"},
+      "targets": [{
+        "format": "table",
+        "rawSql": "select last_detected_at as \"last seen\", severity, rule_id as rule, entity_type || ':' || entity_id as entity, occurrences, observed, threshold, triage from detections.alerts where active order by last_detected_at desc limit 50",
+        "rawQuery": true
+      }]
+    },
+    {
+      "type": "table",
+      "title": "Highest risk entities",
+      "description": "Scores here are as stored; decay is applied when read through the API.",
+      "gridPos": {"h": 9, "w": 12, "x": 12, "y": 8},
+      "datasource": {"type": "postgres", "uid": "bloodhound-postgres"},
+      "targets": [{
+        "format": "table",
+        "rawSql": "select entity_type as type, entity_id as entity, round(score, 1) as score, round(peak_score, 1) as peak, updated_at as \"last alert\" from detections.risk_scores where score > 0 order by score desc limit 25",
+        "rawQuery": true
+      }]
+    },
+    {
+      "type": "table",
+      "title": "Rule quality — precision against analyst verdicts",
+      "description": "Precision is only meaningful once alerts have been triaged. Untriaged alerts are the work not yet done.",
+      "gridPos": {"h": 9, "w": 12, "x": 0, "y": 17},
+      "datasource": {"type": "postgres", "uid": "bloodhound-postgres"},
+      "targets": [{
+        "format": "table",
+        "rawSql": "select rule_id as rule, count(*) as alerts, sum(occurrences) as firings, count(*) filter (where triage = 'true_positive') as tp, count(*) filter (where triage = 'false_positive') as fp, count(*) filter (where triage = 'untriaged') as untriaged, round(count(*) filter (where triage = 'true_positive')::numeric / nullif(count(*) filter (where triage in ('true_positive','false_positive')), 0), 3) as precision from detections.alerts group by rule_id order by alerts desc",
+        "rawQuery": true
+      }]
+    },
+    {
+      "type": "table",
+      "title": "Response actions",
+      "description": "Anything sitting in 'proposed' is waiting for a human. That is the system working.",
+      "gridPos": {"h": 9, "w": 12, "x": 12, "y": 17},
+      "datasource": {"type": "postgres", "uid": "bloodhound-postgres"},
+      "targets": [{
+        "format": "table",
+        "rawSql": "select proposed_at as proposed, action, target_type || ':' || target_id as target, status, requires_approval as \"needs approval\", approved_by, coalesce(error, result) as outcome from detections.response_actions order by proposed_at desc limit 50",
+        "rawQuery": true
+      }]
+    },
+    {
+      "type": "table",
+      "title": "Audit trail",
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 26},
+      "datasource": {"type": "postgres", "uid": "bloodhound-postgres"},
+      "targets": [{
+        "format": "table",
+        "rawSql": "select at, actor, action, subject_type || ':' || subject_id as subject, outcome, detail::text from detections.audit_log order by at desc limit 100",
+        "rawQuery": true
+      }]
+    }
+  ]
+}

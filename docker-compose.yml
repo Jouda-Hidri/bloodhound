@@ -1,0 +1,261 @@
+name: bloodhound
+
+services:
+
+  # Kafka-compatible broker. Redpanda rather than Kafka + ZooKeeper/KRaft because it is a single
+  # container with the same client API — the Java code here would work unchanged against Kafka.
+  redpanda:
+    image: redpandadata/redpanda:v24.3.1
+    container_name: bloodhound-redpanda
+    command:
+      - redpanda
+      - start
+      - --mode=dev-container
+      - --smp=1
+      - --memory=1G
+      - --default-log-level=warn
+      # Two listeners: `internal` for other containers, `external` for apps run on the host.
+      # Getting advertised addresses wrong is the single most common Kafka-in-Docker failure.
+      - --kafka-addr=internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr=internal://redpanda:9092,external://localhost:19092
+      - --schema-registry-addr=internal://0.0.0.0:8081,external://0.0.0.0:18081
+      - --pandaproxy-addr=internal://0.0.0.0:8082,external://0.0.0.0:18082
+      - --advertise-pandaproxy-addr=internal://redpanda:8082,external://localhost:18082
+      - --rpc-addr=redpanda:33145
+      - --advertise-rpc-addr=redpanda:33145
+      # Auto-creation off. With it on, whichever client mentions a topic first wins — and the
+      # default is one partition. Kafka Streams then finds its own repartition topics already
+      # created with the wrong partition count and shuts the whole client down:
+      #   "Existing internal topic ...-repartition has invalid partitions: expected: 6; actual: 1"
+      # Explicit topics also mean a typo in a topic name fails loudly instead of silently
+      # publishing into a brand new topic nobody is reading.
+      - --set
+      - redpanda.auto_create_topics_enabled=false
+    ports:
+      - "19092:19092"   # Kafka API (host)
+      - "18082:18082"   # HTTP proxy (host)
+      # Redpanda's own schema registry (container port 18081) is deliberately NOT published.
+      # See the schema-registry service below for why we run Confluent's instead.
+      - "9644:9644"     # Admin API
+    volumes:
+      - redpanda-data:/var/lib/redpanda/data
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -q 'Healthy:.*true'"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # Creates topics explicitly instead of relying on auto-creation, which would give every topic
+  # one partition and no retention policy.
+  redpanda-init:
+    image: redpandadata/redpanda:v24.3.1
+    container_name: bloodhound-redpanda-init
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        rpk topic create security.events.raw \
+          --brokers redpanda:9092 \
+          --partitions 6 \
+          --replicas 1 \
+          --topic-config retention.ms=604800000 \
+          --topic-config cleanup.policy=delete || true
+        rpk topic create security.events.raw.dlq \
+          --brokers redpanda:9092 \
+          --partitions 3 \
+          --replicas 1 \
+          --topic-config retention.ms=2592000000 || true
+        # Alerts are keyed by entity, so partition count bounds how much the responder could ever
+        # parallelise. Kept equal to the event topic for symmetry.
+        rpk topic create security.alerts \
+          --brokers redpanda:9092 \
+          --partitions 6 \
+          --replicas 1 \
+          --topic-config retention.ms=2592000000 || true
+        rpk topic create security.alerts.dlq \
+          --brokers redpanda:9092 \
+          --partitions 3 \
+          --replicas 1 \
+          --topic-config retention.ms=2592000000 || true
+        rpk topic list --brokers redpanda:9092
+    restart: "no"
+
+  # Confluent's Schema Registry, running against Redpanda's Kafka API.
+  #
+  # Redpanda ships its own registry and it would be the obvious choice — but its JSON Schema
+  # support rejects any schema containing a property literally named `id`, anywhere in the tree:
+  #
+  #   {"error_code":422,"message":"bundled schema with mismatched dialect '...' for id key"}
+  #
+  # It appears to treat a *property named* `id` as the legacy draft-04 `id` keyword. ECS mandates
+  # both `event.id` and `user.id`, so that is not a field we can rename. Minimal reproduction is
+  # in docs/decisions/0003-schema-contracts.md.
+  #
+  # Confluent's registry handles the same schema correctly, and it speaks the identical REST API,
+  # so only the URL changes. Worth knowing that "Kafka-compatible" holds at the protocol level far
+  # more reliably than it does across the surrounding ecosystem.
+  schema-registry:
+    image: confluentinc/cp-schema-registry:7.8.0
+    container_name: bloodhound-schema-registry
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    environment:
+      SCHEMA_REGISTRY_HOST_NAME: schema-registry
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: PLAINTEXT://redpanda:9092
+      SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
+      SCHEMA_REGISTRY_SCHEMA_COMPATIBILITY_LEVEL: backward
+      SCHEMA_REGISTRY_KAFKASTORE_TOPIC_REPLICATION_FACTOR: 1
+    ports:
+      # 18085, not the conventional 8081: a kubectl port-forward binds 127.0.0.1:18081 on this
+      # machine, and a process bound to loopback beats Docker's 0.0.0.0 mapping for localhost
+      # connections — requests reach the wrong service with no error to explain it.
+      - "${BLOODHOUND_SCHEMA_REGISTRY_PORT:-18085}:8081"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8081/subjects || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  # Web UI for browsing topics and messages. Very useful when an event is not arriving and you
+  # need to know whether the producer or the consumer is at fault.
+  console:
+    image: redpandadata/console:v2.8.0
+    container_name: bloodhound-console
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    environment:
+      KAFKA_BROKERS: redpanda:9092
+      KAFKA_SCHEMAREGISTRY_ENABLED: "true"
+      KAFKA_SCHEMAREGISTRY_URLS: http://schema-registry:8081
+    ports:
+      # Host ports are deliberately non-default: 8080 and 5432 are already taken on this machine
+      # by another project. Override with BLOODHOUND_CONSOLE_PORT / BLOODHOUND_POSTGRES_PORT.
+      - "${BLOODHOUND_CONSOLE_PORT:-8090}:8080"
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: bloodhound-postgres
+    environment:
+      POSTGRES_DB: bloodhound
+      POSTGRES_USER: bloodhound
+      POSTGRES_PASSWORD: bloodhound
+    ports:
+      - "${BLOODHOUND_POSTGRES_PORT:-5433}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    command:
+      - postgres
+      # Raised from the 100MB default: partitioned tables with several indexes each generate
+      # a lot of WAL during bulk ingest, and the default causes constant checkpointing.
+      - -c
+      - max_wal_size=2GB
+      - -c
+      - shared_buffers=256MB
+      # Logs any statement slower than a second, which is how you find the missing index.
+      - -c
+      - log_min_duration_statement=1000
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bloodhound -d bloodhound"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # ------------------------------------------------------------------
+  # Observability
+  # ------------------------------------------------------------------
+
+  prometheus:
+    image: prom/prometheus:v3.1.0
+    container_name: bloodhound-prometheus
+    volumes:
+      - ./ops/prometheus:/etc/prometheus:ro
+      - prometheus-data:/prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=7d
+      - --web.enable-lifecycle
+    ports:
+      # 9090 is taken on this machine, so Prometheus is exposed on 9091.
+      - "${BLOODHOUND_PROMETHEUS_PORT:-9091}:9090"
+    extra_hosts:
+      # Docker Desktop provides this automatically; the entry makes Linux behave the same, so
+      # Prometheus can scrape the four services running on the host.
+      - "host.docker.internal:host-gateway"
+
+  grafana:
+    image: grafana/grafana:11.5.1
+    container_name: bloodhound-grafana
+    depends_on:
+      - prometheus
+      - postgres
+    environment:
+      # Anonymous admin: this is a laptop, and a login screen between you and your own dashboards
+      # teaches nothing. Never do this anywhere real.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_USERS_DEFAULT_THEME: dark
+      GF_FEATURE_TOGGLES_ENABLE: publicDashboards
+    volumes:
+      - ./ops/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./ops/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "${BLOODHOUND_GRAFANA_PORT:-3000}:3000"
+
+  # ------------------------------------------------------------------
+  # Search tier — opt in with: docker compose --profile search up -d
+  #
+  # Behind a profile because OpenSearch wants about 1.5GB of RAM on its own. The platform works
+  # without it: Postgres stays the system of record and the consumer degrades to not indexing.
+  # ------------------------------------------------------------------
+
+  opensearch:
+    image: opensearchproject/opensearch:2.18.0
+    container_name: bloodhound-opensearch
+    profiles: [search]
+    environment:
+      discovery.type: single-node
+      bootstrap.memory_lock: "true"
+      OPENSEARCH_JAVA_OPTS: -Xms512m -Xmx512m
+      # Security plugin off: TLS and an admin password between you and a laptop index is friction
+      # with no lesson attached. Week 19 is where auth gets taken seriously.
+      DISABLE_SECURITY_PLUGIN: "true"
+      DISABLE_INSTALL_DEMO_CONFIG: "true"
+    ulimits:
+      memlock: {soft: -1, hard: -1}
+      nofile: {soft: 65536, hard: 65536}
+    volumes:
+      - opensearch-data:/usr/share/opensearch/data
+    ports:
+      - "${BLOODHOUND_OPENSEARCH_PORT:-9200}:9200"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+  opensearch-dashboards:
+    image: opensearchproject/opensearch-dashboards:2.18.0
+    container_name: bloodhound-opensearch-dashboards
+    profiles: [search]
+    depends_on:
+      opensearch:
+        condition: service_healthy
+    environment:
+      OPENSEARCH_HOSTS: '["http://opensearch:9200"]'
+      DISABLE_SECURITY_DASHBOARDS_PLUGIN: "true"
+    ports:
+      - "${BLOODHOUND_OSD_PORT:-5601}:5601"
+
+volumes:
+  redpanda-data:
+  postgres-data:
+  prometheus-data:
+  grafana-data:
+  opensearch-data:

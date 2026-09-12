@@ -1,0 +1,65 @@
+spring:
+  application:
+    name: bloodhound-consumer
+  datasource:
+    url: ${POSTGRES_URL:jdbc:postgresql://localhost:5433/bloodhound}
+    username: ${POSTGRES_USER:bloodhound}
+    password: ${POSTGRES_PASSWORD:bloodhound}
+    hikari:
+      maximum-pool-size: 10
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:19092}
+    consumer:
+      group-id: bloodhound-ingest
+      # Start from the beginning the first time this group runs, so a fresh database gets the
+      # backlog rather than only whatever arrives after startup.
+      auto-offset-reset: earliest
+      # Offsets are committed by hand, after the rows are in Postgres. See KafkaConsumerConfig.
+      enable-auto-commit: false
+      max-poll-records: 500
+    # Used only for the dead letter topic and for replay.
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+      acks: all
+      properties:
+        enable.idempotence: true
+    listener:
+      ack-mode: manual_immediate
+
+server:
+  port: 8102
+
+bloodhound:
+  ingest:
+    partition-days-ahead: 7
+    # Retention is off by default. Deleting security data should require saying so out loud.
+    retention-enabled: false
+    retain-days: 30
+    retention-cron: "0 30 3 * * *"
+    quality-check-millis: 300000
+  search:
+    enabled: true
+    url: ${OPENSEARCH_URL:http://localhost:9200}
+    index-prefix: security-events
+    timeout-seconds: 5
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      show-details: always
+  metrics:
+    tags:
+      application: bloodhound-consumer
+
+logging:
+  level:
+    io.bloodhound: INFO
+    org.apache.kafka: WARN

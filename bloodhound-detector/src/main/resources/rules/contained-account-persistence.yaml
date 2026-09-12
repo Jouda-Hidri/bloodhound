@@ -1,0 +1,28 @@
+id: contained-account-persistence
+name: Continued access attempts against a contained account
+description: >
+  Login attempts against an account that response automation has already disabled.
+
+  This rule exists to measure containment rather than to catch an intrusion. If it fires, the
+  containment worked — something is still trying and is now being refused. If an account is
+  disabled and this stays silent, either the attacker left or, more worryingly, they had already
+  moved to a path that does not go through the login endpoint.
+severity: low
+technique: T1078
+enabled: true
+
+match:
+  event.action: user-login
+  event.outcome: failure
+  event.reason: account disabled
+
+group_by: user.id
+entity_type: user
+
+window: PT10M
+grace: PT2M
+threshold: 5
+
+context_fields:
+  - source.ip
+  - source.geo.country_iso_code
