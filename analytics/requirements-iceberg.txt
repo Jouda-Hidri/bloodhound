@@ -1,0 +1,15 @@
+# Iceberg table format — snapshots, schema evolution, atomic commits (iceberg_table.py).
+#
+# Kept out of requirements.txt, and therefore out of the Airflow image, because of a real
+# version conflict: pyiceberg requires SQLAlchemy >= 2.0, and Airflow 2.10 pins SQLAlchemy 1.4.
+# Installing both produces an Airflow that cannot run its own migrations:
+#
+#   Type annotation for "TaskInstance.dag_model" can't be correctly interpreted for
+#   Annotated Declarative Table form
+#
+# This is the ordinary reason real deployments isolate task dependencies from the scheduler's
+# — KubernetesPodOperator, DockerOperator, or a virtualenv per task — rather than installing
+# everything into one image and hoping the pins agree. No DAG here needs Iceberg, so the
+# cheapest correct answer is not to install it alongside Airflow.
+-r requirements.txt
+pyiceberg[sql-postgres,s3fs]>=0.8,<0.10

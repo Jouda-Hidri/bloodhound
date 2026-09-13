@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.bloodhound.common.EventJson;
 import io.bloodhound.common.Topics;
 import io.bloodhound.common.alert.Alert;
+import io.bloodhound.common.baseline.UserBaseline;
 import io.bloodhound.common.event.EventFields;
 import io.bloodhound.common.event.SecurityEvent;
 import io.bloodhound.detector.config.DetectorProperties;
@@ -16,6 +17,7 @@ import org.apache.kafka.common.utils.Bytes;
 import org.apache.kafka.streams.KeyValue;
 import org.apache.kafka.streams.StreamsBuilder;
 import org.apache.kafka.streams.kstream.Consumed;
+import org.apache.kafka.streams.kstream.GlobalKTable;
 import org.apache.kafka.streams.kstream.Grouped;
 import org.apache.kafka.streams.kstream.KStream;
 import org.apache.kafka.streams.kstream.Materialized;
@@ -64,6 +66,9 @@ public class DetectionTopology {
     private final MeterRegistry meters;
     private final ObjectMapper mapper = EventJson.mapper();
 
+    /** Compacted topic carrying one baseline per account. A table, not a stream. */
+    public static final String BASELINES_TOPIC = "security.baselines";
+
     private volatile List<DetectionRule> loadedRules = List.of();
 
     public DetectionTopology(RuleLoader ruleLoader, DetectorProperties props, MeterRegistry meters) {
@@ -74,6 +79,26 @@ public class DetectionTopology {
 
     public List<DetectionRule> rules() {
         return loadedRules;
+    }
+
+    /**
+     * Detections that exist as code rather than as a rule file, and the technique each covers.
+     *
+     * <p>These are invisible to anything that enumerates the YAML, which is exactly how the
+     * ATT&CK coverage report came to under-count itself.
+     */
+    public Map<String, String> processorDetections() {
+        Map<String, String> detections = new LinkedHashMap<>();
+        if (props.getImpossibleTravel().isEnabled()) {
+            detections.put(ImpossibleTravelProcessor.RULE_ID, "T1078");
+        }
+        if (props.getSessionHijack().isEnabled()) {
+            detections.put(SessionHijackProcessor.RULE_ID, "T1539");
+        }
+        if (props.getBaselineDeviation().isEnabled()) {
+            detections.put(BaselineDeviationProcessor.RULE_ID, "T1078");
+        }
+        return detections;
     }
 
     @Bean
@@ -109,6 +134,12 @@ public class DetectionTopology {
 
         if (props.getImpossibleTravel().isEnabled()) {
             addImpossibleTravel(builder, events, eventSerde, alertSerde);
+        }
+        if (props.getSessionHijack().isEnabled()) {
+            addSessionHijack(builder, events, eventSerde, alertSerde);
+        }
+        if (props.getBaselineDeviation().isEnabled()) {
+            addBaselineDeviation(builder, events, eventSerde, alertSerde);
         }
 
         return events;
@@ -238,6 +269,86 @@ public class DetectionTopology {
                 .peek((key, alert) -> fired.increment(), Named.as("count-impossible-travel"))
                 .to(Topics.ALERTS, Produced.with(Serdes.String(), alertSerde)
                         .withName("emit-impossible-travel"));
+    }
+
+    /**
+     * Sequence detection for a stolen session — the gap the scoring job kept reporting.
+     *
+     * <p>Needs every event for one user to reach the same task so consecutive events can be
+     * compared, which is what the repartition guarantees after selectKey.
+     */
+    private void addSessionHijack(StreamsBuilder builder,
+                                  KStream<String, SecurityEvent> events,
+                                  JsonSerde<SecurityEvent> eventSerde,
+                                  JsonSerde<Alert> alertSerde) {
+
+        builder.addStateStore(Stores.keyValueStoreBuilder(
+                Stores.persistentKeyValueStore(SessionHijackProcessor.STORE_NAME),
+                Serdes.String(),
+                new JsonSerde<>(mapper, SessionHijackProcessor.SessionFingerprint.class)));
+
+        Counter fired = Counter.builder("bloodhound.detector.alerts")
+                .tag("rule", SessionHijackProcessor.RULE_ID)
+                .tag("severity", "medium")
+                .register(meters);
+
+        events.selectKey((key, event) -> EventFields.get(event, "user.id"),
+                        Named.as("key-session-hijack"))
+                .filter((entity, event) -> entity != null, Named.as("has-entity-session-hijack"))
+                .repartition(org.apache.kafka.streams.kstream.Repartitioned
+                        .with(Serdes.String(), eventSerde)
+                        .withName("session-hijack-by-user"))
+                .process(() -> new SessionHijackProcessor(props.getSessionHijack()),
+                        Named.as("detect-session-hijack"),
+                        SessionHijackProcessor.STORE_NAME)
+                .peek((key, alert) -> fired.increment(), Named.as("count-session-hijack"))
+                .to(Topics.ALERTS, Produced.with(Serdes.String(), alertSerde)
+                        .withName("emit-session-hijack"));
+    }
+
+    /**
+     * Baseline-relative detection, joined against a GlobalKTable.
+     *
+     * <p>Global rather than a regular KTable because the baselines are small (one row per
+     * account), every task needs the whole set, and a GlobalKTable requires no co-partitioning —
+     * so the event stream does not have to be repartitioned to match it. The cost is that every
+     * instance holds a full copy, which is the right trade for reference data of this size.
+     */
+    private void addBaselineDeviation(StreamsBuilder builder,
+                                      KStream<String, SecurityEvent> events,
+                                      JsonSerde<SecurityEvent> eventSerde,
+                                      JsonSerde<Alert> alertSerde) {
+
+        JsonSerde<UserBaseline> baselineSerde = new JsonSerde<>(mapper, UserBaseline.class);
+
+        // Registering the table is what makes its store available to the processor below.
+        builder.globalTable(
+                BASELINES_TOPIC,
+                Consumed.with(Serdes.String(), baselineSerde).withName("baselines"),
+                Materialized.<String, UserBaseline, KeyValueStore<Bytes, byte[]>>as(
+                                BaselineDeviationProcessor.STORE_NAME)
+                        .withKeySerde(Serdes.String())
+                        .withValueSerde(baselineSerde));
+
+        Counter fired = Counter.builder("bloodhound.detector.alerts")
+                .tag("rule", BaselineDeviationProcessor.RULE_ID)
+                .tag("severity", "low")
+                .register(meters);
+
+        events.selectKey((key, event) -> EventFields.get(event, "user.id"),
+                        Named.as("key-baseline-deviation"))
+                .filter((entity, event) -> entity != null, Named.as("has-entity-baseline"))
+                // No store name passed. A GlobalKTable's store is available to every processor
+                // implicitly, and naming it explicitly is rejected:
+                //   "Global StateStore user-baselines can be used by a Processor without being
+                //    specified; it should not be explicitly passed."
+                // Which is the opposite of the rule for ordinary state stores, where omitting
+                // the name is the error.
+                .process(BaselineDeviationProcessor::new,
+                        Named.as("detect-baseline-deviation"))
+                .peek((key, alert) -> fired.increment(), Named.as("count-baseline-deviation"))
+                .to(Topics.ALERTS, Produced.with(Serdes.String(), alertSerde)
+                        .withName("emit-baseline-deviation"));
     }
 
     private static String sample(Set<String> values, int limit) {

@@ -1,0 +1,37 @@
+id: aws-root-account-used
+name: AWS root account used
+description: >
+  Any activity at all by the AWS account root user.
+
+  Root cannot be scoped by IAM policy, cannot be meaningfully constrained, and is not supposed to
+  be used — AWS's own guidance is to lock it away after setup and operate through roles. So this
+  rule has a threshold of 1: there is no "normal" volume of root usage to tune against.
+
+  It is also the rare rule where a false positive is cheap and a false negative is not. Somebody
+  legitimately breaking glass can close the alert in thirty seconds; an attacker using root and
+  nobody noticing is the end of the account.
+severity: critical
+technique: T1078.004
+enabled: true
+
+match:
+  # service.environment rather than a hard-coded account id: the rule should hold for every
+  # AWS account this platform ever ingests, not just the one it was written against.
+  service.environment: aws
+
+match_any:
+  user.name:
+    - root
+
+group_by: user.id
+entity_type: user
+
+window: PT15M
+grace: PT5M
+threshold: 1
+
+context_fields:
+  - source.ip
+  - user_agent.original
+  - event.action
+  - event.outcome

@@ -28,8 +28,9 @@ public class DataQualityService {
     private static final Logger log = LoggerFactory.getLogger(DataQualityService.class);
 
     private static final String RECORD = """
-            insert into data_quality_checks (check_name, passed, observed, threshold, detail)
-            values (?, ?, ?, ?, ?)
+            insert into data_quality_checks
+                (check_name, category, passed, observed, threshold, detail)
+            values (?, ?, ?, ?, ?, ?)
             """;
 
     private final JdbcTemplate jdbc;
@@ -45,7 +46,7 @@ public class DataQualityService {
 
         // Freshness. The most important check there is: a pipeline that stopped an hour ago looks
         // perfectly healthy to any query that does not ask "how new is the newest row".
-        results.add(check("freshness_seconds",
+        results.add(check("freshness_seconds", Category.LIVENESS,
                 scalar("select coalesce(extract(epoch from (now() - max(ts))), 999999) from raw_events"),
                 BigDecimal.valueOf(300), Comparison.AT_MOST,
                 "Seconds since the most recent event"));
@@ -61,7 +62,7 @@ public class DataQualityService {
         //
         // The `labels is null` predicate is the one place outside the scoring job that reads
         // simulation ground truth, and it is measuring the pipeline rather than detecting.
-        results.add(check("max_lag_seconds",
+        results.add(check("max_lag_seconds", Category.LIVENESS,
                 scalar("""
                         select coalesce(max(extract(epoch from (ingested_at - ts))), 0)
                         from raw_events
@@ -73,7 +74,7 @@ public class DataQualityService {
 
         // Attribution. An event with no user cannot be attributed, so per-user detections skip it
         // silently — the most dangerous kind of data loss, because nothing errors.
-        results.add(check("null_user_rate",
+        results.add(check("null_user_rate", Category.CORRECTNESS,
                 scalar("""
                         select coalesce(count(*) filter (where user_id is null)::numeric
                                / nullif(count(*), 0), 0)
@@ -82,7 +83,7 @@ public class DataQualityService {
                 BigDecimal.valueOf(0.001), Comparison.AT_MOST,
                 "Share of recent events with no user.id"));
 
-        results.add(check("null_source_ip_rate",
+        results.add(check("null_source_ip_rate", Category.CORRECTNESS,
                 scalar("""
                         select coalesce(count(*) filter (where source_ip is null)::numeric
                                / nullif(count(*), 0), 0)
@@ -93,7 +94,12 @@ public class DataQualityService {
 
         // Cardinality. A collapse here means a producer started sending a constant — for example
         // every event attributed to one service account after a bad deploy.
-        results.add(check("distinct_users_hourly",
+        //
+        // Classified as liveness rather than correctness: with the producer stopped there are
+        // simply no recent accounts, which says nothing about whether yesterday's stored data
+        // is trustworthy. Treating it as correctness blocked the nightly archive every time
+        // the simulator was paused.
+        results.add(check("distinct_users_hourly", Category.LIVENESS,
                 scalar("""
                         select count(distinct user_id)
                         from raw_events where ts > now() - interval '1 hour'
@@ -103,7 +109,7 @@ public class DataQualityService {
 
         // Unknown actions. A steady trickle is fine; a spike means a producer is emitting
         // something the schema does not model, and detections are blind to it.
-        results.add(check("unknown_action_rate",
+        results.add(check("unknown_action_rate", Category.CORRECTNESS,
                 scalar("""
                         select coalesce(count(*) filter (where event_action = 'unknown')::numeric
                                / nullif(count(*), 0), 0)
@@ -113,20 +119,20 @@ public class DataQualityService {
                 "Share of recent events whose action did not map to a known value"));
 
         // The dead letter backlog is itself a data quality signal.
-        results.add(check("dead_letters_last_hour",
+        results.add(check("dead_letters_last_hour", Category.CORRECTNESS,
                 scalar("select count(*) from dead_letters where failed_at > now() - interval '1 hour'"),
                 BigDecimal.ZERO, Comparison.AT_MOST,
                 "Messages dead-lettered in the last hour"));
 
         // Rows stranded in the default partition block that day from ever being partitioned.
-        results.add(check("default_partition_rows",
+        results.add(check("default_partition_rows", Category.CORRECTNESS,
                 scalar("select count(*) from raw_events_default"),
                 BigDecimal.ZERO, Comparison.AT_MOST,
                 "Events whose timestamp fell outside every daily partition"));
 
         for (Result result : results) {
-            jdbc.update(RECORD, result.name(), result.passed(), result.observed(),
-                    result.threshold(), result.detail());
+            jdbc.update(RECORD, result.name(), result.category().value(), result.passed(),
+                    result.observed(), result.threshold(), result.detail());
         }
 
         List<String> failures = results.stream().filter(r -> !r.passed()).map(Result::name).toList();
@@ -138,7 +144,7 @@ public class DataQualityService {
     public List<Map<String, Object>> latest() {
         return jdbc.queryForList("""
                 select distinct on (check_name)
-                    check_name, checked_at, passed, observed, threshold, detail
+                    check_name, category, checked_at, passed, observed, threshold, detail
                 from data_quality_checks
                 order by check_name, checked_at desc
                 """);
@@ -149,16 +155,42 @@ public class DataQualityService {
         return value == null ? BigDecimal.ZERO : value;
     }
 
-    private static Result check(String name, BigDecimal observed, BigDecimal threshold,
-                                Comparison comparison, String detail) {
+    private static Result check(String name, Category category, BigDecimal observed,
+                                BigDecimal threshold, Comparison comparison, String detail) {
         boolean passed = comparison == Comparison.AT_MOST
                 ? observed.compareTo(threshold) <= 0
                 : observed.compareTo(threshold) >= 0;
-        return new Result(name, passed, observed, threshold, detail);
+        return new Result(name, category, passed, observed, threshold, detail);
     }
 
     private enum Comparison { AT_MOST, AT_LEAST }
 
-    private record Result(String name, boolean passed, BigDecimal observed,
+    /**
+     * What kind of question a check answers.
+     *
+     * <p>The distinction is what lets automation act on the results. {@link #LIVENESS} failing
+     * means data is not arriving — an incident, but no reason to stop archiving yesterday, which
+     * is complete either way. {@link #CORRECTNESS} failing means the data that did arrive cannot
+     * be trusted, and archiving it only makes a permanent copy of the problem.
+     *
+     * <p>Without this, the orchestrator has to hard-code which check names to ignore, and that
+     * list goes stale the moment somebody adds a check.
+     */
+    public enum Category {
+        LIVENESS("liveness"),
+        CORRECTNESS("correctness");
+
+        private final String value;
+
+        Category(String value) {
+            this.value = value;
+        }
+
+        public String value() {
+            return value;
+        }
+    }
+
+    private record Result(String name, Category category, boolean passed, BigDecimal observed,
                           BigDecimal threshold, String detail) {}
 }

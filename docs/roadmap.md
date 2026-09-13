@@ -12,17 +12,25 @@ Start date: 2026-09-11.
 
 ## Status
 
-Weeks 1–18 are substantially built. This document stays written as a plan rather than a changelog:
-the reasoning for each week is the point, and the headings carry what is done.
+Weeks 1–23 are built. This document stays written as a plan rather than a changelog: the
+reasoning for each week is the point, and the headings carry what is done.
 
 | | weeks | state |
 |---|---|---|
 | Month 1 — ingestion | 1–4 | built |
 | Month 2 — data platform | 5–8 | built |
-| Month 3 — detection engineering | 9–12 | built, except measured tuning (Week 11) |
-| Month 4 — scale and storage | 13–16 | search built; lakehouse, orchestrator, load test outstanding |
-| Month 5 — response and cloud | 17–20 | incidents and response built; real auth and cloud outstanding |
-| Month 6 — depth and packaging | 21–24 | not started |
+| Month 3 — detection engineering | 9–12 | built, and measured |
+| Month 4 — scale and storage | 13–16 | built; bottleneck found and documented |
+| Month 5 — response and cloud | 17–20 | built; Terraform validated but never applied to real AWS |
+| Month 6 — depth and packaging | 21–24 | 21–23 built; Week 24 is not code |
+
+The measured results live in [`performance.md`](performance.md) and
+[ADR 0009](decisions/0009-detection-depth.md); the narrative is in
+[`writeups/`](writeups/).
+
+**Week 24 — packaging and applying — is the remaining work, and it is yours rather than the
+codebase's.** The CV framing, the applications, the conversations. The repo is the evidence for
+those, not a substitute.
 
 ✅ built  ⚠️ half built — see each week below.
 
@@ -251,7 +259,7 @@ state (alerts, incidents, baselines), OpenSearch holds raw events for free-text 
 **Learn.** Index lifecycle management, hot/warm tiers, why you would use each store. ECS field
 names pay off here — the events go in unmodified.
 
-### Week 14 — Object storage and lakehouse basics
+### Week 14 — Object storage and lakehouse basics ✅ built
 
 **Build.** MinIO (S3-compatible) + Parquet + Iceberg or Delta. Archive raw events to object
 storage, query them with DuckDB or Trino.
@@ -259,16 +267,19 @@ storage, query them with DuckDB or Trino.
 **Learn.** Columnar formats, partitioning strategy, file sizing. Why 10,000 small files is a
 disaster and how compaction fixes it.
 
-### Week 15 — Orchestration ⚠️ half built
+### Week 15 — Orchestration ✅ built
 
-**Built.** Retention and data quality run as scheduled jobs in the consumer. A real orchestrator is still to do.
+**Built.** An Airflow DAG whose whole reason for existing is one edge: `tier_down` is reachable
+only through `verify`, so retention cannot delete a day from Postgres until the archive has been
+read back and checked. As independent `@Scheduled` timers, nothing stopped retention running
+after a failed archive — silent, total data loss.
 
 **Build.** Airflow or Dagster for the batch side: daily baseline rebuild, **retention enforcement
 (drop partitions older than N days — currently they accumulate forever)**, data quality checks.
 
 Quality checks: null rates, cardinality drift, freshness SLA, row-count anomalies.
 
-### Week 16 — Load test
+### Week 16 — Load test ✅ built
 
 **Build.** Push to 50,000 events/sec on your laptop. Find where it breaks. Profile it (async-profiler
 or JFR). Fix one bottleneck. Measure again.
@@ -301,16 +312,19 @@ path.
 your automation can weaponise it into a denial of service against real users. That nuance is what
 security engineers are paid for.
 
-### Week 19 — Secure your own platform ⚠️ half built
+### Week 19 — Secure your own platform ✅ built
 
-**Built.** API-key RBAC with three roles on the responder. Real OIDC is still to do.
+**Built.** OIDC against Keycloak, with the API-key mode retained as a fallback. Audience is
+validated, not just issuer. 401 and 403 mean different things. See
+[ADR 0007](decisions/0007-identity.md) — including the `nobody` user, who authenticates perfectly
+and is authorised for nothing.
 
 **Build.** OIDC on both APIs (Keycloak locally), RBAC, secrets out of config into Vault or SOPS,
 TLS everywhere, mTLS to Kafka. Both APIs currently have no authentication at all.
 
 Threat-model the platform yourself. STRIDE is fine. Write it down.
 
-### Week 20 — Cloud and infrastructure as code
+### Week 20 — Cloud and infrastructure as code ⚠️ built, not applied to real AWS
 
 **Build.** Terraform the whole thing onto AWS — MSK or self-managed Kafka, RDS, S3, ECS or EKS.
 Use LocalStack if cost is a concern.
@@ -325,7 +339,7 @@ real SIEM engineering effort actually goes.
 
 ## Month 6 — Depth, proof, and packaging
 
-### Weeks 21–22 — Go deep on one axis
+### Weeks 21–22 — Go deep on one axis ✅ built (detection depth)
 
 Pick one. Depth in one area beats breadth across three.
 
@@ -336,7 +350,7 @@ Pick one. Depth in one area beats breadth across three.
 - **Security depth** — attack the platform yourself: log injection, detection evasion, spoofed
   source IPs, timestamp manipulation to slip between windows. Then defend it.
 
-### Week 23 — Prove it
+### Week 23 — Prove it ✅ built
 
 Three technical write-ups: the architecture, the detection-tuning results with real numbers, and
 the failure-mode postmortems from Weeks 5 and 16.

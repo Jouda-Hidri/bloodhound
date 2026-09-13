@@ -200,8 +200,51 @@ public class ResponderProperties {
 
     public static class Auth {
 
-        /** Off makes every endpoint open — acceptable on a laptop, never anywhere else. */
+        /**
+         * One of {@code oidc}, {@code apikey} or {@code none}.
+         *
+         * <p>Defaults to {@code apikey} so the platform still starts without Keycloak running.
+         * {@code oidc} is what a real deployment uses — see docs/decisions/0007-identity.md.
+         */
+        private String mode = "apikey";
+
+        /** Keycloak realm issuer. Must match the token's {@code iss} claim byte for byte. */
+        private String issuerUri = "http://localhost:8280/realms/bloodhound";
+
+        /**
+         * Required value of the token's {@code aud} claim.
+         *
+         * <p>Not optional. Without it the responder accepts any token the realm ever issued,
+         * including one minted for a different application entirely.
+         */
+        private String audience = "bloodhound-responder";
+
+        /** Retained for the apikey mode. */
         private boolean enabled = true;
+
+        public String getMode() {
+            return mode;
+        }
+
+        public void setMode(String mode) {
+            this.mode = mode;
+        }
+
+        public String getIssuerUri() {
+            return issuerUri;
+        }
+
+        public void setIssuerUri(String issuerUri) {
+            this.issuerUri = issuerUri;
+        }
+
+        public String getAudience() {
+            return audience;
+        }
+
+        public void setAudience(String audience) {
+            this.audience = audience;
+        }
 
         /**
          * API key → role. Lab-grade authentication: keys in config, compared in constant time,

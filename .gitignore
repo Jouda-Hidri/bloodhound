@@ -29,3 +29,19 @@ __pycache__/
 
 # Local tool permissions, specific to one machine
 .claude/settings.local.json
+
+# Terraform
+#
+# .terraform/ is downloaded provider binaries (hundreds of MB).
+# tfstate is environment-specific and routinely contains secrets — it is the single most
+# commonly leaked file in infrastructure repos. Real deployments keep it in remote state
+# with encryption and locking, never in git.
+# .terraform.lock.hcl IS committed: it pins provider versions, like any other lockfile.
+infra/terraform/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+tfplan
+crash.log
+*.auto.tfvars
+terraform.tfvars

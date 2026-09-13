@@ -24,6 +24,7 @@
     <module>bloodhound-consumer</module>
     <module>bloodhound-detector</module>
     <module>bloodhound-responder</module>
+    <module>bloodhound-cloudtrail</module>
   </modules>
 
   <properties>

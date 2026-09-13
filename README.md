@@ -9,23 +9,24 @@ actually disables the account — and the account's next login attempt fails in 
 stream, which trips a rule measuring whether the containment worked.
 
 ```
-  bloodhound-producer ──▶ Redpanda ──▶ bloodhound-consumer ──▶ Postgres (raw_events)
-   ├─ normal traffic       security      ├─ validate               daily partitions
-   ├─ attack scenarios     .events.raw   ├─ dedupe             └──▶ OpenSearch (investigation)
-   └─ lab IAM API                        └─ dead-letter
+  producer ────┐                        ┌──▶ Postgres   days, indexed, ms queries
+  cloudtrail ──┴──▶ Redpanda ──▶ consumer ──▶ OpenSearch  investigation search
+   ├─ normal traffic   security.events   └──▶ Parquet/S3  years, 15x cheaper per row
+   ├─ attack scenarios      .raw                 │
+   └─ lab IAM API                    Airflow: archive ─▶ verify ─▶ tier down
           ▲                                   │
-          │                     bloodhound-detector (Kafka Streams)
-          │                       ├─ 8 YAML rules, event-time windows
-          │                       └─ impossible-travel processor
+          │                     detector (Kafka Streams)
+          │                       ├─ 10 YAML rules, event-time windows
+          │                       └─ 3 sequence processors + baseline GlobalKTable
           │                                   │
           │                            security.alerts
           │                                   ▼
-          │                     bloodhound-responder
-          │                       ├─ deduplicate ──▶ risk score (decaying)
+          │                     responder  (OIDC, three roles)
+          │                       ├─ deduplicate ──▶ decaying risk score
           │                       ├─ incident state machine
           │                       └─ response playbooks
           │                                   │
-          └───────── containment ─────────────┘   (approval-gated, reversible, audited)
+          └───────── containment ─────────────┘   approval-gated, reversible, audited
 ```
 
 ## Quick start
@@ -57,7 +58,7 @@ make audit               # who did what, when
 make revert ID=1         # undo
 ```
 
-`make help` lists all 59 targets. `make adversary-on` runs attacks continuously in the background,
+`make help` lists all 92 targets. `make adversary-on` runs attacks continuously in the background,
 which is the only way to see what the platform looks like after a few hours of mixed traffic.
 
 > **`make build` runs `clean`**, which deletes `target/` out from under any service you have
@@ -83,21 +84,31 @@ overridable by environment variable.
 | Schema Registry | http://localhost:18085 | a `kubectl port-forward` binds 18081 |
 | OpenSearch | http://localhost:9200 | `make up-search` |
 
-Credentials are `bloodhound` / `bloodhound` for Postgres, and `bh-viewer-key` /
-`bh-analyst-key` / `bh-responder-key` for the responder API.
+| Keycloak | http://localhost:8280 | `make up-auth` |
+| Airflow | http://localhost:8180 | `make up-airflow` |
+| MinIO console | http://localhost:9001 | `make up-lake` |
+| LocalStack | http://localhost:4566 | `make up-cloud` |
+
+Postgres is `bloodhound` / `bloodhound`. The responder accepts either OIDC tokens
+(`make token USER=analyst`) or the lab API keys `bh-viewer-key` / `bh-analyst-key` /
+`bh-responder-key`, depending on `AUTH_MODE`.
 
 ## What each piece does
 
 ```
-bloodhound-common/     ECS event schema, alert model, shared JSON config, topic names
+bloodhound-common/     ECS event schema, alert model, baselines, shared JSON config
 bloodhound-producer/   simulated application: traffic, labelled attacks, lab IAM target
 bloodhound-consumer/   ingest to Postgres + OpenSearch, DLQ, retention, data quality
-bloodhound-detector/   Kafka Streams: YAML rules, windowing, Sigma export
-bloodhound-responder/  alert dedup, risk scoring, incidents, response, audit, RBAC
-analytics/             Python: behavioural baselines, detection scoring
-ops/                   Prometheus rules, Grafana dashboards
+bloodhound-detector/   Kafka Streams: YAML rules, windowing, sequence detection, Sigma export
+bloodhound-responder/  alert dedup, risk scoring, incidents, response, audit, OIDC/RBAC
+bloodhound-cloudtrail/ maps AWS CloudTrail into the ECS schema
+analytics/             Python: baselines, detection scoring, lakehouse, load testing
+infra/terraform/       AWS infrastructure, validated against LocalStack
+ops/                   Prometheus, Grafana, Airflow DAGs, Keycloak realm
 docs/roadmap.md        the 24-week plan this is built against
 docs/decisions/        why things are the way they are — read these
+docs/writeups/         three technical write-ups and a demo script
+docs/performance.md    load test results and where the bottleneck is
 sql/queries.sql        analyst queries to run by hand
 ```
 
@@ -131,7 +142,7 @@ documents the JSON Schema compatibility trap that makes the intuitive answer the
 
 ## Detections
 
-Eight rules in YAML plus one hand-written processor, covering seven ATT&CK techniques.
+Ten rules in YAML plus three hand-written processors, covering nine ATT&CK techniques.
 
 ```bash
 make rules       # what is loaded
@@ -149,7 +160,11 @@ make sigma       # export the rule set as Sigma
 | `api-key-burst` | T1552.001 | user | key used at machine speed |
 | `suspicious-password-change` | T1098 | user | credential change from a scripted agent |
 | `contained-account-persistence` | T1078 | user | still trying after containment |
+| `aws-root-account-used` | T1078.004 | user | any AWS root activity at all |
+| `aws-iam-privilege-grant` | T1098 | user | IAM policy or role change |
 | `impossible-travel` (processor) | T1078 | user | two logins, two countries, minutes apart |
+| `session-hijack` (processor) | T1539 | user | session used from a new network, no re-auth |
+| `baseline-deviation` (processor) | T1078 | user | login unlike this account's own history |
 
 Rules are data; adding one is adding a file. The boundary — and what the format deliberately
 cannot express — is in [ADR 0004](docs/decisions/0004-detection-as-data.md).
@@ -182,9 +197,9 @@ Per attack scenario             runs  detected  missed    recall
   session_hijack                   2         1       1     50.0%
   ...
 Overall
-  precision  100.0%   (25 of 25 alerts landed on an entity under attack)
-  recall      91.7%   (11 of 12 attack runs produced at least one alert)
-  f1          95.7%
+  precision  100.0%   (20 of 20 alerts landed on an entity under attack)
+  recall     100.0%   (7 of 7 attack runs produced at least one alert)
+  f1         100.0%
 ```
 
 Read those numbers sceptically, and read the docstring in `score_detections.py` before quoting
@@ -192,23 +207,25 @@ them. Precision is flattered by entity-level attribution, and background traffic
 as benign ground truth — so real false positives need a human verdict, which is what
 `make triage ID=<alert> VERDICT=false_positive` and the `triage` column are for.
 
-`session_hijack` is genuinely undetected: nothing here catches a stolen token used from a new
-address with no failed logins. That is a gap, not a rounding error.
+That gap is now closed — `session_hijack` sat at 50% recall for weeks with the report naming it
+on every run, which is exactly how the need for sequence detection surfaced. Before and after,
+and the four bugs found on the way, are in
+[ADR 0009](docs/decisions/0009-detection-depth.md).
 
 ## Deliberately unfinished
 
 | gap | currently | planned |
 |---|---|---|
-| Auth | API keys in config, no expiry or rotation | OIDC + Keycloak (Week 19) |
+| Auth | OIDC via Keycloak; API-key mode retained | MFA, federation, service-to-service |
 | `block_source_ip` | recorded, no enforcement point | — |
 | Approval | one click, one role | two-person rule for privileged accounts |
 | Risk weights | chosen by judgement | measured |
-| Baselines | computed, nothing reads them | baseline-relative rules |
+| Baselines | read by the detector via GlobalKTable | longer history; an anomaly model |
 | Wire format | JSON | Avro, if the size ever matters |
-| Cloud | all local | Terraform + CloudTrail (Week 20) |
-| Orchestration | Spring `@Scheduled` | Airflow/Dagster (Week 15) |
-| Lakehouse | none | MinIO + Parquet + Iceberg (Week 14) |
-| Load testing | none | 50k events/sec, profiled (Week 16) |
+| Cloud | Terraform validated on LocalStack | apply to real AWS |
+| Orchestration | Airflow DAG with a verified archive gate | more DAGs; alerting on SLA misses |
+| Lakehouse | MinIO + Parquet + Iceberg | archive on the Iceberg path, not raw Parquet |
+| Load testing | 5k events/sec clean; bottleneck found | `uuid` PK, drop unused index, `COPY` |
 
 ## Things that broke, and what they taught
 
@@ -242,10 +259,27 @@ Kept because the failures were the useful part:
   from pipeline lag. It now measures organic traffic only. A red light that means nothing is worse
   than no light, because people stop looking at it.
 
+## Write-ups
+
+- [Architecture and the decisions behind it](docs/writeups/01-architecture.md)
+- [How do you know your detections work?](docs/writeups/02-detection-quality.md)
+- [Ten things that broke](docs/writeups/03-postmortems.md)
+- [Five-minute demo script](docs/writeups/demo-script.md)
+
 ## Roadmap
 
-Weeks 1–18 of [`docs/roadmap.md`](docs/roadmap.md) are substantially built. What remains is
-Week 14 (lakehouse), Week 15's orchestrator, Week 16 (load testing), Week 19's real auth, Week 20
-(cloud + CloudTrail), and Weeks 21–24 — depth, write-ups, packaging.
+Weeks 1–23 of [`docs/roadmap.md`](docs/roadmap.md) are built. What remains is Week 24 —
+packaging and applying — which is not code.
+
+Optional profiles, because running all of them at once exceeds 7.7 GB of Docker memory and
+OOM-kills the broker:
+
+```bash
+make up-search     # OpenSearch
+make up-lake       # MinIO
+make up-airflow    # Airflow
+make up-auth       # Keycloak
+make up-cloud      # LocalStack
+```
 # bloodhound
 # bloodhound

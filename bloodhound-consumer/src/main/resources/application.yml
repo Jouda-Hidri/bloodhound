@@ -42,7 +42,7 @@ bloodhound:
     retention-cron: "0 30 3 * * *"
     quality-check-millis: 300000
   search:
-    enabled: true
+    enabled: ${SEARCH_ENABLED:true}
     url: ${OPENSEARCH_URL:http://localhost:9200}
     index-prefix: security-events
     timeout-seconds: 5

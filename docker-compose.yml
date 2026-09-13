@@ -79,6 +79,18 @@ services:
           --partitions 3 \
           --replicas 1 \
           --topic-config retention.ms=2592000000 || true
+        # Per-account behavioural baselines, consumed by the detector as a GlobalKTable.
+        #
+        # cleanup.policy=compact, not delete: this is a *table*, not a stream. Compaction keeps
+        # the latest value per key forever, so a detector starting cold rebuilds the full
+        # baseline set from the topic. Under a retention policy the older keys would age out and
+        # the detector would silently come up knowing nothing about the quieter accounts.
+        rpk topic create security.baselines \
+          --brokers redpanda:9092 \
+          --partitions 1 \
+          --replicas 1 \
+          --topic-config cleanup.policy=compact \
+          --topic-config min.cleanable.dirty.ratio=0.1 || true
         rpk topic list --brokers redpanda:9092
     restart: "no"
 
@@ -253,9 +265,251 @@ services:
     ports:
       - "${BLOODHOUND_OSD_PORT:-5601}:5601"
 
+  # ------------------------------------------------------------------
+  # Lakehouse — opt in with: docker compose --profile lake up -d
+  #
+  # The third storage tier, and the one that is cheap per byte. Postgres holds days,
+  # OpenSearch holds what you search interactively, object storage holds years.
+  # ------------------------------------------------------------------
+
+  minio:
+    # Docker Hub's minio/minio now requires authentication; quay.io is MinIO's own
+    # public registry and serves the identical image.
+    image: quay.io/minio/minio:RELEASE.2024-11-07T00-52-20Z
+    container_name: bloodhound-minio
+    profiles: [lake]
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: bloodhound
+      MINIO_ROOT_PASSWORD: bloodhound123
+    ports:
+      - "${BLOODHOUND_MINIO_PORT:-9000}:9000"
+      - "${BLOODHOUND_MINIO_CONSOLE_PORT:-9001}:9001"
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "mc ready local || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  minio-init:
+    image: quay.io/minio/mc:RELEASE.2024-11-05T11-29-45Z
+    container_name: bloodhound-minio-init
+    profiles: [lake]
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        mc alias set lake http://minio:9000 bloodhound bloodhound123
+        mc mb --ignore-existing lake/bloodhound-events
+        mc mb --ignore-existing lake/bloodhound-warehouse
+        # Object storage is where retention gets expensive to get wrong: there is no
+        # partition to drop, only millions of objects to enumerate. A lifecycle rule makes
+        # expiry the storage layer's job rather than a job that has to keep up.
+        mc ilm rule add --expiry-days 365 lake/bloodhound-events 2>/dev/null || true
+        mc ls lake
+    restart: "no"
+
+  # ------------------------------------------------------------------
+  # Cloud emulation — opt in with: docker compose --profile cloud up -d
+  #
+  # LocalStack emulates the AWS APIs well enough to prove a Terraform configuration is coherent.
+  # It does not emulate IAM evaluation, quotas, cost, or the ways real AWS says no — so
+  # `terraform apply` against it validates the configuration, not the deployment.
+  # ------------------------------------------------------------------
+
+  localstack:
+    image: localstack/localstack:3.8
+    container_name: bloodhound-localstack
+    profiles: [cloud]
+    environment:
+      SERVICES: s3,iam,sts,kms,sns,sqs,logs,cloudtrail,events
+      DEBUG: "0"
+      AWS_DEFAULT_REGION: eu-central-1
+    ports:
+      - "${BLOODHOUND_LOCALSTACK_PORT:-4566}:4566"
+    volumes:
+      - localstack-data:/var/lib/localstack
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:4566/_localstack/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+  # ------------------------------------------------------------------
+  # Identity — opt in with: docker compose --profile auth up -d
+  #
+  # Replaces the API keys from Week 18 with real OIDC. The keys were config-file strings that
+  # never expired, could not be rotated without a restart, and made the audit trail say
+  # "someone holding the responder key" rather than naming a person.
+  # ------------------------------------------------------------------
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.0.7
+    container_name: bloodhound-keycloak
+    profiles: [auth]
+    depends_on:
+      keycloak-db-init:
+        condition: service_completed_successfully
+    command: ["start-dev", "--import-realm"]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: bloodhound
+      # Keycloak's own store. Its own database, like Airflow's: different lifecycle, and realm
+      # migrations should never be able to touch the security data.
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres:5432/keycloak
+      KC_DB_USERNAME: bloodhound
+      KC_DB_PASSWORD: bloodhound
+      KC_HTTP_ENABLED: "true"
+      KC_HOSTNAME_STRICT: "false"
+      # The issuer string is baked into every token and must match what the resource server
+      # expects, byte for byte. Tokens minted as `localhost:8280` are rejected by a validator
+      # configured for `keycloak:8080` — the single most common OIDC-in-Docker failure.
+      KC_HOSTNAME: http://localhost:8280
+    volumes:
+      - ./ops/keycloak:/opt/keycloak/data/import:ro
+    ports:
+      - "${BLOODHOUND_KEYCLOAK_PORT:-8280}:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/8080 && echo -e 'GET /realms/bloodhound HTTP/1.1\\nHost: localhost\\nConnection: close\\n\\n' >&3 && cat <&3 | grep -q '200 OK'"]
+      interval: 10s
+      timeout: 5s
+      retries: 40
+
+  keycloak-db-init:
+    image: postgres:16-alpine
+    container_name: bloodhound-keycloak-db-init
+    profiles: [auth]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: bloodhound
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        psql -h postgres -U bloodhound -d bloodhound -tc \
+          "select 1 from pg_database where datname='keycloak'" | grep -q 1 \
+          || psql -h postgres -U bloodhound -d bloodhound -c "create database keycloak"
+        echo "keycloak database ready"
+    restart: "no"
+
+  # ------------------------------------------------------------------
+  # Orchestration — opt in with: docker compose --profile orchestrator up -d
+  #
+  # Scheduler and webserver as separate services, which is the shape a real deployment has.
+  # `airflow standalone` would be one container, and would teach the wrong thing about how
+  # Airflow is actually operated.
+  # ------------------------------------------------------------------
+
+  airflow-db-init:
+    image: postgres:16-alpine
+    container_name: bloodhound-airflow-db-init
+    profiles: [orchestrator]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: bloodhound
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        # Airflow's metadata belongs in its own database, not in a schema beside the security
+        # data. Different lifecycle, different backup policy, and Airflow migrations should
+        # never be able to touch raw_events.
+        psql -h postgres -U bloodhound -d bloodhound -tc \
+          "select 1 from pg_database where datname='airflow'" | grep -q 1 \
+          || psql -h postgres -U bloodhound -d bloodhound -c "create database airflow"
+        echo "airflow metadata database ready"
+    restart: "no"
+
+  airflow-init:
+    build:
+      context: .
+      dockerfile: ops/airflow/Dockerfile
+    image: bloodhound/airflow:2.10.5
+    container_name: bloodhound-airflow-init
+    profiles: [orchestrator]
+    depends_on:
+      airflow-db-init:
+        condition: service_completed_successfully
+    environment: &airflow-env
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://bloodhound:bloodhound@postgres:5432/airflow
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+      AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "true"
+      # Fernet key is fixed so connections survive a restart. A real deployment generates one
+      # and keeps it in a secret store; hard-coding it is a lab-only shortcut.
+      AIRFLOW__CORE__FERNET_KEY: "U3VwZXJTZWNyZXRGZXJuZXRLZXlGb3JCbG9vZGhvdW5kTGFiPQ=="
+      # The analytics scripts talk to Postgres and MinIO by container name, and to the
+      # Java services on the host through host.docker.internal.
+      BLOODHOUND_DSN: postgresql://bloodhound:bloodhound@postgres:5432/bloodhound
+      BLOODHOUND_S3_ENDPOINT: http://minio:9000
+      BLOODHOUND_CONSUMER_URL: http://host.docker.internal:8102
+      BLOODHOUND_RETAIN_DAYS: "30"
+      PYTHONPATH: /opt/bloodhound/analytics
+    volumes: &airflow-volumes
+      - ./ops/airflow/dags:/opt/airflow/dags:ro
+      - ./analytics:/opt/bloodhound/analytics:ro
+      - airflow-logs:/opt/airflow/logs
+    extra_hosts: &airflow-hosts
+      - "host.docker.internal:host-gateway"
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        airflow db migrate
+        airflow users create --username admin --password bloodhound \
+          --firstname Lab --lastname Operator --role Admin --email admin@bloodhound.lab || true
+        echo "airflow initialised"
+    restart: "no"
+
+  airflow-scheduler:
+    image: bloodhound/airflow:2.10.5
+    container_name: bloodhound-airflow-scheduler
+    profiles: [orchestrator]
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    environment: *airflow-env
+    volumes: *airflow-volumes
+    extra_hosts: *airflow-hosts
+    command: scheduler
+    healthcheck:
+      test: ["CMD-SHELL", "airflow jobs check --job-type SchedulerJob --hostname $${HOSTNAME}"]
+      interval: 20s
+      timeout: 10s
+      retries: 10
+
+  airflow-webserver:
+    image: bloodhound/airflow:2.10.5
+    container_name: bloodhound-airflow-webserver
+    profiles: [orchestrator]
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    environment: *airflow-env
+    volumes: *airflow-volumes
+    extra_hosts: *airflow-hosts
+    command: webserver
+    ports:
+      - "${BLOODHOUND_AIRFLOW_PORT:-8180}:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/health || exit 1"]
+      interval: 20s
+      timeout: 10s
+      retries: 15
+
 volumes:
   redpanda-data:
   postgres-data:
   prometheus-data:
   grafana-data:
   opensearch-data:
+  minio-data:
+  airflow-logs:
+  localstack-data:

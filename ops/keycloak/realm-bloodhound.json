@@ -1,0 +1,112 @@
+{
+  "realm": "bloodhound",
+  "enabled": true,
+  "displayName": "Bloodhound Security Platform",
+
+  "accessTokenLifespan": 300,
+  "ssoSessionIdleTimeout": 1800,
+  "ssoSessionMaxLifespan": 28800,
+
+  "sslRequired": "none",
+  "registrationAllowed": false,
+  "bruteForceProtected": true,
+  "failureFactor": 5,
+  "waitIncrementSeconds": 60,
+
+  "roles": {
+    "realm": [
+      {
+        "name": "VIEWER",
+        "description": "Read alerts, incidents, risk and the audit trail"
+      },
+      {
+        "name": "ANALYST",
+        "description": "VIEWER, plus triage verdicts and incident state changes"
+      },
+      {
+        "name": "RESPONDER",
+        "description": "ANALYST, plus approving and executing containment"
+      }
+    ]
+  },
+
+  "clients": [
+    {
+      "clientId": "bloodhound-responder",
+      "name": "Bloodhound Responder API",
+      "description": "Resource server. Validates tokens; never issues them.",
+      "enabled": true,
+      "bearerOnly": true,
+      "publicClient": false,
+      "standardFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false
+    },
+    {
+      "clientId": "bloodhound-cli",
+      "name": "Bloodhound CLI",
+      "description": "Public client with the password grant, so tokens can be fetched without a browser. Lab only.",
+      "enabled": true,
+      "publicClient": true,
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": true,
+      "redirectUris": ["http://localhost:*", "http://127.0.0.1:*"],
+      "webOrigins": ["*"],
+      "protocolMappers": [
+        {
+          "name": "bloodhound-responder-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": {
+            "included.client.audience": "bloodhound-responder",
+            "access.token.claim": "true",
+            "id.token.claim": "false"
+          }
+        }
+      ]
+    }
+  ],
+
+  "users": [
+    {
+      "username": "viewer",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "Val",
+      "lastName": "Viewer",
+      "email": "viewer@bloodhound.lab",
+      "credentials": [{ "type": "password", "value": "viewer", "temporary": false }],
+      "realmRoles": ["VIEWER"]
+    },
+    {
+      "username": "analyst",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "Ana",
+      "lastName": "Analyst",
+      "email": "analyst@bloodhound.lab",
+      "credentials": [{ "type": "password", "value": "analyst", "temporary": false }],
+      "realmRoles": ["ANALYST"]
+    },
+    {
+      "username": "responder",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "Rae",
+      "lastName": "Responder",
+      "email": "responder@bloodhound.lab",
+      "credentials": [{ "type": "password", "value": "responder", "temporary": false }],
+      "realmRoles": ["RESPONDER"]
+    },
+    {
+      "username": "nobody",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "No",
+      "lastName": "Roles",
+      "email": "nobody@bloodhound.lab",
+      "credentials": [{ "type": "password", "value": "nobody", "temporary": false }],
+      "realmRoles": []
+    }
+  ]
+}

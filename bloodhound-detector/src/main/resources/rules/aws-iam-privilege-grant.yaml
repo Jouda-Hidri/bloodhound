@@ -1,0 +1,35 @@
+id: aws-iam-privilege-grant
+name: IAM permissions granted
+description: >
+  A principal attaching policies, changing roles or adding group memberships in AWS.
+
+  On its own this is ordinary platform work — it is what a deploy role does all day. It earns its
+  place by feeding risk scoring, so that a principal doing this *while also* failing
+  authorization checks and creating access keys accumulates enough risk to open an incident,
+  which none of the three would do alone. That is the whole argument for scoring across rules
+  rather than alerting per rule.
+
+  The specific thing worth catching — a policy document granting Action "*" on Resource "*" —
+  is not expressible here: the policy is a JSON string inside requestParameters, and the rule
+  format matches field equality, not structure. Detecting that properly needs the mapper to
+  extract a `policy_grants_wildcard` field at ingest time. Recorded as a gap rather than
+  pretended at.
+severity: medium
+technique: T1098
+enabled: true
+
+match:
+  event.action: role-change
+  service.environment: aws
+
+group_by: user.id
+entity_type: user
+
+window: PT30M
+grace: PT5M
+threshold: 1
+
+context_fields:
+  - source.ip
+  - user_agent.original
+  - event.outcome

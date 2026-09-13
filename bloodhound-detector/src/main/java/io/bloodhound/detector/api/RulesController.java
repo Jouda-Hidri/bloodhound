@@ -50,20 +50,37 @@ public class RulesController {
         }).toList();
     }
 
-    /** Which ATT&CK techniques the rule set covers, and how many rules address each. */
+    /**
+     * Which ATT&CK techniques the detections cover, and what addresses each.
+     *
+     * <p>Includes the hand-written processors, not only the YAML rules. Reporting coverage from
+     * the rule files alone under-counted by a technique — {@code session-hijack} (T1539) exists
+     * only as a processor — and a coverage report that quietly omits a third of the detections
+     * is worse than no coverage report, because it is the artifact people check before deciding
+     * what to build next.
+     */
     @GetMapping("/coverage")
     public Map<String, Object> coverage() {
         Map<String, List<String>> byTechnique = new LinkedHashMap<>();
+
         for (DetectionRule rule : topology.rules()) {
             if (rule.isEnabled() && rule.technique() != null) {
                 byTechnique.computeIfAbsent(rule.technique(), t -> new java.util.ArrayList<>())
                         .add(rule.id());
             }
         }
+        for (Map.Entry<String, String> processor : topology.processorDetections().entrySet()) {
+            byTechnique.computeIfAbsent(processor.getValue(), t -> new java.util.ArrayList<>())
+                    .add(processor.getKey() + " (processor)");
+        }
+
+        long enabledRules = topology.rules().stream().filter(DetectionRule::isEnabled).count();
         return Map.of(
                 "techniques", byTechnique,
                 "techniqueCount", byTechnique.size(),
-                "enabledRules", topology.rules().stream().filter(DetectionRule::isEnabled).count());
+                "enabledRules", enabledRules,
+                "processorDetections", topology.processorDetections().size(),
+                "totalDetections", enabledRules + topology.processorDetections().size());
     }
 
     @GetMapping(value = "/{id}/sigma", produces = MediaType.TEXT_PLAIN_VALUE)

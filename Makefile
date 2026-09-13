@@ -38,13 +38,34 @@ up-search: ## Also start OpenSearch + Dashboards (needs ~1.5GB RAM)
 	$(COMPOSE) --profile search up -d
 	@echo "  OpenSearch Dashboards  http://localhost:5601"
 
+.PHONY: up-lake
+up-lake: ## Also start MinIO object storage
+	$(COMPOSE) --profile lake up -d
+	@echo "  MinIO console  http://localhost:9001  (bloodhound / bloodhound123)"
+
+.PHONY: up-cloud
+up-cloud: ## Also start LocalStack (AWS emulation)
+	$(COMPOSE) --profile cloud up -d
+	@echo "  LocalStack  http://localhost:4566"
+
+.PHONY: up-auth
+up-auth: ## Also start Keycloak (OIDC identity provider)
+	$(COMPOSE) --profile auth up -d
+	@echo "  Keycloak  http://localhost:8280  (admin / bloodhound)"
+	@echo "  Then run the responder with: AUTH_MODE=oidc make responder"
+
+.PHONY: up-airflow
+up-airflow: ## Also start Airflow (scheduler + webserver)
+	$(COMPOSE) --profile orchestrator --profile lake up -d
+	@echo "  Airflow  http://localhost:8180  (admin / bloodhound)"
+
 .PHONY: down
 down: ## Stop everything (keeps data)
-	$(COMPOSE) --profile search down
+	$(COMPOSE) --profile search --profile lake --profile orchestrator --profile auth --profile cloud down
 
 .PHONY: reset
 reset: ## Stop everything and delete all data
-	$(COMPOSE) --profile search down -v
+	$(COMPOSE) --profile search --profile lake --profile orchestrator --profile auth --profile cloud down -v
 	rm -rf bloodhound-detector/target/kafka-streams
 
 .PHONY: logs
@@ -273,7 +294,9 @@ contained: ## Accounts currently disabled by response automation
 $(VENV):
 	python3 -m venv $(VENV)
 	$(VENV)/bin/pip install -q --upgrade pip
-	$(VENV)/bin/pip install -q -r analytics/requirements.txt
+	# The local venv gets Iceberg too; the Airflow image deliberately does not.
+	# See analytics/requirements-iceberg.txt for the SQLAlchemy conflict.
+	$(VENV)/bin/pip install -q -r analytics/requirements-iceberg.txt
 
 .PHONY: venv
 venv: $(VENV) ## Create the Python virtualenv
@@ -282,9 +305,188 @@ venv: $(VENV) ## Create the Python virtualenv
 baseline: $(VENV) ## Rebuild per-account behavioural baselines
 	@cd analytics && ../$(PY) baseline.py --days $(or $(DAYS),7)
 
+.PHONY: publish-baselines
+publish-baselines: $(VENV) ## Publish baselines to the compacted Kafka topic for the detector
+	@cd analytics && ../$(PY) publish_baselines.py
+
 .PHONY: score
 score: $(VENV) ## Score detections against simulated ground truth
-	@cd analytics && ../$(PY) score_detections.py --hours $(or $(HOURS),6) $(if $(filter true,$(SAVE)),--save,)
+	@cd analytics && ../$(PY) score_detections.py $(if $(MINUTES),--minutes $(MINUTES),--hours $(or $(HOURS),6)) $(if $(filter true,$(SAVE)),--save,)
+
+## Lakehouse
+
+.PHONY: archive
+archive: $(VENV) ## Archive events to object storage as Parquet (DAYS=2)
+	@cd analytics && ../$(PY) archive.py --backfill $(or $(DAYS),2) --verify
+
+.PHONY: lake-stats
+lake-stats: $(VENV) ## Compare Postgres vs object-storage cost per row
+	@cd analytics && ../$(PY) lakehouse.py stats
+
+.PHONY: lake-query
+lake-query: $(VENV) ## Analyst queries over the Parquet archive
+	@cd analytics && ../$(PY) lakehouse.py query
+
+.PHONY: lake-pruning
+lake-pruning: $(VENV) ## Measure partition pruning against a full scan
+	@cd analytics && ../$(PY) lakehouse.py pruning --days $(or $(DAYS),60)
+
+.PHONY: lake-small-files
+lake-small-files: $(VENV) ## Load testing
+
+.PHONY: load-ramp
+load-ramp: $(VENV) ## Step through rates until the pipeline stops keeping up
+	@cd analytics && ../$(PY) loadtest.py ramp --steps $(or $(STEPS),20,200,1000,2500,5000,10000) --seconds $(or $(SECONDS),35) --save
+
+.PHONY: load-sustain
+load-sustain: $(VENV) ## Hold one rate and watch whether lag grows (RATE=5000 MINUTES=5)
+	@cd analytics && ../$(PY) loadtest.py sustain --rate $(or $(RATE),2000) --minutes $(or $(MINUTES),5)
+
+.PHONY: load-report
+load-report: $(VENV) ## Previous load test results
+	@cd analytics && ../$(PY) loadtest.py report
+
+## Demonstrate why many small files are a disaster
+	@cd analytics && ../$(PY) lakehouse.py small-files
+
+.PHONY: lake-compact
+lake-compact: $(VENV) ## Compact a day's partition into one file (DATE=2026-09-12)
+	@cd analytics && ../$(PY) lakehouse.py compact --date $(DATE)
+
+.PHONY: iceberg
+iceberg: $(VENV) ## Iceberg snapshots, time travel and schema evolution
+	@cd analytics && ../$(PY) iceberg_table.py demo
+
+.PHONY: iceberg-history
+iceberg-history: $(VENV) ## List Iceberg table snapshots
+	@cd analytics && ../$(PY) iceberg_table.py history
+
+## Identity
+
+KEYCLOAK ?= http://localhost:8280/realms/bloodhound/protocol/openid-connect/token
+
+.PHONY: token
+token: ## Fetch an access token (USER=viewer|analyst|responder|nobody)
+	@curl -s -X POST "$(KEYCLOAK)" -d client_id=bloodhound-cli -d grant_type=password \
+		-d "username=$(or $(USER),viewer)" -d "password=$(or $(USER),viewer)" \
+		| python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])"
+
+.PHONY: whoami
+whoami: ## Decode the claims in a token (USER=analyst)
+	@$(MAKE) -s token USER=$(or $(USER),viewer) | python3 -c "\
+import sys,json,base64; t=sys.stdin.read().strip(); p=t.split('.')[1]; p+='='*(-len(p)%4); \
+c=json.loads(base64.urlsafe_b64decode(p)); \
+print('  user: ', c['preferred_username']); print('  iss:  ', c['iss']); \
+print('  aud:  ', c['aud']); \
+print('  roles:', [r for r in c.get('realm_access',{}).get('roles',[]) if r.isupper()])"
+
+.PHONY: authz-matrix
+authz-matrix: ## Probe every role against every endpoint class
+	@echo "  user         /alerts  triage   approve"; \
+	echo "  ------------------------------------------"; \
+	for u in viewer analyst responder nobody; do \
+		T=$$($(MAKE) -s token USER=$$u); \
+		printf "  %-12s %-8s %-8s %s\n" $$u \
+		  "$$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $$T" '$(RESPONDER)/alerts?limit=1')" \
+		  "$$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $$T" '$(RESPONDER)/alerts/none/triage?verdict=benign')" \
+		  "$$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $$T" '$(RESPONDER)/actions/99999/approve')"; \
+	done; \
+	printf "  %-12s %-8s %-8s %s\n" "no token" \
+	  "$$(curl -s -o /dev/null -w '%{http_code}' '$(RESPONDER)/alerts?limit=1')" \
+	  "$$(curl -s -o /dev/null -w '%{http_code}' -X POST '$(RESPONDER)/alerts/none/triage?verdict=benign')" \
+	  "$$(curl -s -o /dev/null -w '%{http_code}' -X POST '$(RESPONDER)/actions/99999/approve')"; \
+	echo ""; echo "  200/404 allowed   401 authenticate first   403 authenticated but refused"
+
+## Cloud
+
+TF_IMAGE ?= hashicorp/terraform:1.9
+TF_NET   ?= bloodhound_default
+TF_DIR   ?= $(PWD)/infra/terraform
+TF = docker run --rm --network $(TF_NET) -v $(TF_DIR):/work -w /work $(TF_IMAGE)
+TF_VARS = -var 'localstack_endpoint=http://localstack:4566'
+
+.PHONY: tf-validate
+tf-validate: ## Terraform fmt, init and validate
+	@$(TF) fmt -check -recursive && echo "  formatting clean"
+	@$(TF) init -backend=false -input=false > /dev/null && echo "  init ok"
+	@$(TF) validate
+
+.PHONY: tf-plan
+tf-plan: ## Plan against LocalStack
+	@$(TF) init -input=false > /dev/null
+	@$(TF) plan -input=false $(TF_VARS)
+
+.PHONY: tf-apply
+tf-apply: ## Apply against LocalStack
+	@$(TF) init -input=false > /dev/null
+	@$(TF) apply -input=false -auto-approve $(TF_VARS)
+
+.PHONY: tf-destroy
+tf-destroy: ## Destroy the LocalStack resources
+	@$(TF) destroy -input=false -auto-approve $(TF_VARS)
+
+.PHONY: tf-verify
+tf-verify: ## Prove what actually exists in LocalStack
+	@echo "  S3 buckets:"
+	@$(COMPOSE) exec -T localstack awslocal s3 ls | sed 's/^/    /'
+	@echo "  IAM roles:"
+	@$(COMPOSE) exec -T localstack awslocal iam list-roles --query 'Roles[].RoleName' --output text | tr '\t' '\n' | sed 's/^/    /'
+	@echo "  responder role — allowed vs denied:"
+	@$(COMPOSE) exec -T localstack awslocal iam get-role-policy --role-name bloodhound-lab-responder \
+		--policy-name contain-only --query PolicyDocument 2>/dev/null | python3 -c "\
+import sys,json; d=json.load(sys.stdin); \
+[print(f\"    {s['Effect']:6} {s['Sid']}: {', '.join(s['Action'] if isinstance(s['Action'],list) else [s['Action']])}\") for s in d['Statement']]"
+
+## CloudTrail
+
+CLOUDTRAIL ?= http://localhost:8105
+
+.PHONY: cloudtrail
+cloudtrail: install-common ## Run the CloudTrail ingestion service (8105)
+	$(MVN) -q -pl bloodhound-cloudtrail spring-boot:run
+
+.PHONY: cloudtrail-replay
+cloudtrail-replay: ## Map the bundled CloudTrail sample into the pipeline
+	@curl -s -X POST $(CLOUDTRAIL)/cloudtrail/replay-sample | $(PP)
+
+.PHONY: cloudtrail-events
+cloudtrail-events: ## Show the CloudTrail-derived events in Postgres
+	@$(COMPOSE) exec -T postgres psql -U bloodhound -d bloodhound -c \
+		"select user_id, event_action, event_outcome, host(source_ip) as src, \
+		        labels->>'cloud_event_name' as aws_api \
+		 from raw_events where labels->>'cloud_provider' = 'aws' order by ts limit 20;"
+
+## Orchestration
+
+.PHONY: dag-run
+dag-run: ## Trigger the daily maintenance DAG (DAY=2026-09-12 to backfill one day)
+	@$(COMPOSE) exec -T airflow-scheduler bash -lc \
+		"airflow dags unpause bloodhound_daily >/dev/null; \
+		 airflow dags trigger bloodhound_daily $(if $(DAY),--conf '{\"day\": \"$(DAY)\"}',)"
+
+.PHONY: dag-status
+dag-status: ## Task states for the most recent DAG run
+	@RUN=$$($(COMPOSE) exec -T airflow-scheduler airflow dags list-runs -d bloodhound_daily -o plain 2>/dev/null | awk 'NR==2{print $$2}' | tr -d '\r'); \
+	echo "run: $$RUN"; \
+	$(COMPOSE) exec -T airflow-scheduler airflow tasks states-for-dag-run bloodhound_daily "$$RUN" -o plain 2>/dev/null | awk 'NR>1{printf "  %-20s %s\n", $$3, $$4}'
+
+.PHONY: dag-tree
+dag-tree: ## Show the DAG dependency tree
+	@$(COMPOSE) exec -T airflow-scheduler bash -lc "airflow tasks list bloodhound_daily --tree" 2>/dev/null | grep -v '^\['
+
+## Load testing
+
+.PHONY: load-ramp
+load-ramp: $(VENV) ## Step through rates until the pipeline stops keeping up
+	@cd analytics && ../$(PY) loadtest.py ramp --steps $(or $(STEPS),20,200,1000,2500,5000,10000) --seconds $(or $(SECONDS),35) --save
+
+.PHONY: load-sustain
+load-sustain: $(VENV) ## Hold one rate and watch whether lag grows (RATE=5000 MINUTES=5)
+	@cd analytics && ../$(PY) loadtest.py sustain --rate $(or $(RATE),2000) --minutes $(or $(MINUTES),5)
+
+.PHONY: load-report
+load-report: $(VENV) ## Previous load test results
+	@cd analytics && ../$(PY) loadtest.py report
 
 ## Demo
 

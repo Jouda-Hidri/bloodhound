@@ -58,13 +58,26 @@ public class AlertService {
 
         // Try to fold into an existing open alert first. The partial unique index on
         // (dedupe_key) where active guarantees there is at most one.
+        // Severity is escalated, never downgraded.
+        //
+        // Without the severity clause below, a rule that first fires LOW and later fires HIGH on
+        // the same entity has the HIGH folded into the open LOW alert: the occurrence count goes
+        // up and the severity does not. A genuinely worse situation then sits in the console
+        // still labelled LOW, which is the most dangerous direction for this to be wrong in.
+        // Observed live — a three-deviation baseline alert absorbed into a one-deviation one.
         List<Map<String, Object>> updated = jdbc.queryForList("""
                 update alerts
                 set last_detected_at = greatest(last_detected_at, ?),
                     occurrences      = occurrences + 1,
                     observed         = greatest(coalesce(observed, 0), ?),
                     window_end       = greatest(coalesce(window_end, ?), ?),
-                    context          = ?::jsonb
+                    context          = ?::jsonb,
+                    severity         = case
+                        when ? = 'critical' or severity = 'critical' then 'critical'
+                        when ? = 'high'     or severity = 'high'     then 'high'
+                        when ? = 'medium'   or severity = 'medium'   then 'medium'
+                        when ? = 'low'      or severity = 'low'      then 'low'
+                        else severity end
                 where dedupe_key = ? and active
                 returning id, occurrences, incident_id
                 """,
@@ -72,6 +85,8 @@ public class AlertService {
                 alert.observed(),
                 Timestamp.from(alert.windowEnd()), Timestamp.from(alert.windowEnd()),
                 context,
+                alert.severity().value(), alert.severity().value(),
+                alert.severity().value(), alert.severity().value(),
                 alert.dedupeKey());
 
         if (!updated.isEmpty()) {

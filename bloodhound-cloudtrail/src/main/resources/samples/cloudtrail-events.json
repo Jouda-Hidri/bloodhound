@@ -1,0 +1,206 @@
+{
+  "Records": [
+    {
+      "eventVersion": "1.08",
+      "eventTime": "2026-09-13T06:14:02Z",
+      "eventSource": "signin.amazonaws.com",
+      "eventName": "ConsoleLogin",
+      "awsRegion": "us-east-1",
+      "sourceIPAddress": "203.0.113.45",
+      "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/126.0",
+      "eventID": "b1a7e1c4-0001-4f1a-9c11-1a2b3c4d5e01",
+      "userIdentity": {
+        "type": "IAMUser",
+        "principalId": "AIDACKCEVSQ6C2EXAMPLE",
+        "arn": "arn:aws:iam::123456789012:user/alice",
+        "accountId": "123456789012",
+        "userName": "alice"
+      },
+      "responseElements": { "ConsoleLogin": "Failure" },
+      "additionalEventData": { "MFAUsed": "No", "LoginTo": "https://console.aws.amazon.com/" }
+    },
+    {
+      "eventVersion": "1.08",
+      "eventTime": "2026-09-13T06:14:31Z",
+      "eventSource": "signin.amazonaws.com",
+      "eventName": "ConsoleLogin",
+      "awsRegion": "us-east-1",
+      "sourceIPAddress": "203.0.113.45",
+      "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/126.0",
+      "eventID": "b1a7e1c4-0002-4f1a-9c11-1a2b3c4d5e02",
+      "userIdentity": {
+        "type": "IAMUser",
+        "principalId": "AIDACKCEVSQ6C2EXAMPLE",
+        "arn": "arn:aws:iam::123456789012:user/alice",
+        "accountId": "123456789012",
+        "userName": "alice"
+      },
+      "responseElements": { "ConsoleLogin": "Success" },
+      "additionalEventData": { "MFAUsed": "No" }
+    },
+    {
+      "eventVersion": "1.08",
+      "eventTime": "2026-09-13T06:15:10Z",
+      "eventSource": "signin.amazonaws.com",
+      "eventName": "ConsoleLogin",
+      "awsRegion": "us-east-1",
+      "sourceIPAddress": "198.51.100.77",
+      "userAgent": "Mozilla/5.0 (X11; Linux x86_64) HeadlessChrome/126.0",
+      "eventID": "b1a7e1c4-0003-4f1a-9c11-1a2b3c4d5e03",
+      "userIdentity": {
+        "type": "Root",
+        "principalId": "123456789012",
+        "arn": "arn:aws:iam::123456789012:root",
+        "accountId": "123456789012"
+      },
+      "responseElements": { "ConsoleLogin": "Success" },
+      "additionalEventData": { "MFAUsed": "No" }
+    },
+    {
+      "eventVersion": "1.08",
+      "eventTime": "2026-09-13T06:16:44Z",
+      "eventSource": "sts.amazonaws.com",
+      "eventName": "AssumeRole",
+      "awsRegion": "us-east-1",
+      "sourceIPAddress": "198.51.100.77",
+      "userAgent": "aws-cli/2.17.0 Python/3.11",
+      "eventID": "b1a7e1c4-0004-4f1a-9c11-1a2b3c4d5e04",
+      "userIdentity": {
+        "type": "AssumedRole",
+        "principalId": "AROACKCEVSQ6C2EXAMPLE:deploy-session-9931",
+        "arn": "arn:aws:sts::123456789012:assumed-role/platform-deploy/deploy-session-9931",
+        "accountId": "123456789012",
+        "sessionContext": {
+          "sessionIssuer": {
+            "type": "Role",
+            "principalId": "AROACKCEVSQ6C2EXAMPLE",
+            "arn": "arn:aws:iam::123456789012:role/platform-deploy",
+            "accountId": "123456789012",
+            "userName": "platform-deploy"
+          }
+        }
+      },
+      "requestParameters": { "roleArn": "arn:aws:iam::123456789012:role/platform-admin" }
+    },
+    {
+      "eventVersion": "1.08",
+      "eventTime": "2026-09-13T06:17:02Z",
+      "eventSource": "iam.amazonaws.com",
+      "eventName": "PutUserPolicy",
+      "awsRegion": "us-east-1",
+      "sourceIPAddress": "198.51.100.77",
+      "userAgent": "aws-cli/2.17.0 Python/3.11",
+      "eventID": "b1a7e1c4-0005-4f1a-9c11-1a2b3c4d5e05",
+      "userIdentity": {
+        "type": "AssumedRole",
+        "principalId": "AROACKCEVSQ6C2EXAMPLE:deploy-session-9931",
+        "arn": "arn:aws:sts::123456789012:assumed-role/platform-deploy/deploy-session-9931",
+        "accountId": "123456789012",
+        "sessionContext": {
+          "sessionIssuer": {
+            "type": "Role",
+            "arn": "arn:aws:iam::123456789012:role/platform-deploy",
+            "accountId": "123456789012",
+            "userName": "platform-deploy"
+          }
+        }
+      },
+      "requestParameters": {
+        "userName": "alice",
+        "policyName": "temporary-admin",
+        "policyDocument": "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":\"*\",\"Resource\":\"*\"}]}"
+      }
+    },
+    {
+      "eventVersion": "1.08",
+      "eventTime": "2026-09-13T06:17:40Z",
+      "eventSource": "iam.amazonaws.com",
+      "eventName": "CreateAccessKey",
+      "awsRegion": "us-east-1",
+      "sourceIPAddress": "198.51.100.77",
+      "userAgent": "aws-cli/2.17.0 Python/3.11",
+      "eventID": "b1a7e1c4-0006-4f1a-9c11-1a2b3c4d5e06",
+      "userIdentity": {
+        "type": "AssumedRole",
+        "principalId": "AROACKCEVSQ6C2EXAMPLE:deploy-session-9931",
+        "arn": "arn:aws:sts::123456789012:assumed-role/platform-deploy/deploy-session-9931",
+        "accountId": "123456789012",
+        "sessionContext": {
+          "sessionIssuer": {
+            "type": "Role",
+            "arn": "arn:aws:iam::123456789012:role/platform-deploy",
+            "accountId": "123456789012",
+            "userName": "platform-deploy"
+          }
+        }
+      },
+      "requestParameters": { "userName": "alice" }
+    },
+    {
+      "eventVersion": "1.08",
+      "eventTime": "2026-09-13T06:18:05Z",
+      "eventSource": "s3.amazonaws.com",
+      "eventName": "GetObject",
+      "awsRegion": "us-east-1",
+      "sourceIPAddress": "198.51.100.77",
+      "userAgent": "aws-cli/2.17.0 Python/3.11",
+      "eventID": "b1a7e1c4-0007-4f1a-9c11-1a2b3c4d5e07",
+      "errorCode": "AccessDenied",
+      "errorMessage": "User: arn:aws:sts::123456789012:assumed-role/platform-deploy/deploy-session-9931 is not authorized to perform: s3:GetObject on resource: arn:aws:s3:::customer-pii/export.csv",
+      "userIdentity": {
+        "type": "AssumedRole",
+        "principalId": "AROACKCEVSQ6C2EXAMPLE:deploy-session-9931",
+        "arn": "arn:aws:sts::123456789012:assumed-role/platform-deploy/deploy-session-9931",
+        "accountId": "123456789012",
+        "sessionContext": {
+          "sessionIssuer": {
+            "type": "Role",
+            "arn": "arn:aws:iam::123456789012:role/platform-deploy",
+            "accountId": "123456789012",
+            "userName": "platform-deploy"
+          }
+        }
+      }
+    },
+    {
+      "eventVersion": "1.08",
+      "eventTime": "2026-09-13T06:19:00Z",
+      "eventSource": "config.amazonaws.com",
+      "eventName": "PutEvaluations",
+      "awsRegion": "us-east-1",
+      "sourceIPAddress": "config.amazonaws.com",
+      "userAgent": "config.amazonaws.com",
+      "eventID": "b1a7e1c4-0008-4f1a-9c11-1a2b3c4d5e08",
+      "userIdentity": {
+        "type": "AWSService",
+        "invokedBy": "config.amazonaws.com",
+        "accountId": "123456789012"
+      }
+    },
+    {
+      "eventVersion": "1.08",
+      "eventTime": "2026-09-13T06:20:15Z",
+      "eventSource": "iam.amazonaws.com",
+      "eventName": "DeleteTrail",
+      "awsRegion": "us-east-1",
+      "sourceIPAddress": "198.51.100.77",
+      "userAgent": "aws-cli/2.17.0 Python/3.11",
+      "eventID": "b1a7e1c4-0009-4f1a-9c11-1a2b3c4d5e09",
+      "userIdentity": {
+        "type": "AssumedRole",
+        "principalId": "AROACKCEVSQ6C2EXAMPLE:deploy-session-9931",
+        "arn": "arn:aws:sts::123456789012:assumed-role/platform-deploy/deploy-session-9931",
+        "accountId": "123456789012",
+        "sessionContext": {
+          "sessionIssuer": {
+            "type": "Role",
+            "arn": "arn:aws:iam::123456789012:role/platform-deploy",
+            "accountId": "123456789012",
+            "userName": "platform-deploy"
+          }
+        }
+      },
+      "requestParameters": { "name": "bloodhound-audit-trail" }
+    }
+  ]
+}

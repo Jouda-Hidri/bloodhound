@@ -35,10 +35,21 @@ Two honest caveats, both of which matter more than the numbers:
    only measures alerts on entities no simulated attack touched. Real false positives include
    alerts that fire on genuine but harmless activity, and those need a human verdict — which is
    what the /alerts/{id}/triage endpoint and the `triage` column exist for.
+
+3. **Detector downtime is scored as missed detection.** The script compares attacks against
+   alerts and has no idea whether the detector was running when a given attack happened, so an
+   attack fired during a restart is reported identically to one no rule covers. That is the
+   difference between "we have no detection for this" and "we had no detection *running*", and
+   conflating them will send you tuning rules that were never given a chance.
+
+   Use `--minutes` to score a window you know the detector was up for. Properly, this wants the
+   detector's uptime as an input — a real deployment tracks coverage gaps explicitly, because
+   "how much of the last week were we actually watching" is a question a SOC has to answer.
 """
 
 import argparse
 import sys
+from datetime import datetime, timedelta, timezone
 from collections import defaultdict
 
 from db import connect, fmt_pct, table_exists
@@ -58,18 +69,28 @@ select
     count(*)                       as events
 from raw_events
 where labels ? 'scenario'
-  and ts > now() - make_interval(hours => %(hours)s)
+  and ts > now() - make_interval(secs => %(lookback_seconds)s)
 group by 1, 2, 3
 order by started
 """
 
+# Selected on last_detected_at, not first_detected_at.
+#
+# Alert deduplication means a re-attack on an entity that already has an open alert updates that
+# row rather than creating one — occurrences goes up, first_detected_at does not move. Filtering
+# on first_detected_at therefore made a *successfully detected* attack look undetected, purely
+# because the alert had been opened before the scoring window began.
+#
+# Observed: a 30-event brute force against u-00074 reported as 0% recall while the alert sat in
+# the database with occurrences=3 and last_detected_at equal to the attack. Deduplication is a
+# feature; a scorer that does not account for it measures the wrong thing.
 ALERTS_SQL = """
 select
     id, rule_id, severity, entity_type, entity_id,
     first_detected_at, last_detected_at, occurrences, triage
 from detections.alerts
-where first_detected_at > now() - make_interval(hours => %(hours)s)
-order by first_detected_at
+where last_detected_at > now() - make_interval(secs => %(window_seconds)s)
+order by last_detected_at
 """
 
 SAVE_SQL = """
@@ -96,12 +117,29 @@ def safe_div(numerator, denominator):
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--hours", type=int, default=6, help="scoring window")
+    parser.add_argument("--hours", type=int, default=6, help="scoring window in hours")
+    parser.add_argument("--minutes", type=int, default=None,
+                        help="scoring window in minutes; overrides --hours. Useful straight "
+                             "after a detector restart, when a wider window would include "
+                             "attacks fired while nothing was listening and report them as "
+                             "missed detections rather than as missing coverage.")
     parser.add_argument("--tolerance-minutes", type=int, default=20,
                         help="how late an alert may be and still count as catching the attack")
     parser.add_argument("--save", action="store_true", help="write results to detection_scores")
     args = parser.parse_args()
     tolerance = args.tolerance_minutes * 60
+    window_hours = (args.minutes / 60.0) if args.minutes else args.hours
+    # make_interval(hours => ...) rejects a fractional argument; secs takes a double.
+    window_seconds = window_hours * 3600.0
+
+    # Ground truth is loaded over a *wider* window than alerts are scored in.
+    #
+    # Recall is measured over attacks that started inside the window. Precision is measured over
+    # alerts active inside it — and those alerts may legitimately refer to an attack that began
+    # before it, because deduplication keeps one alert open across repeated attacks. Loading only
+    # in-window attacks made every such alert look like a false positive, which is the mirror
+    # image of the bug this pairing fixes. Both windows have to be right or one metric lies.
+    lookback_seconds = window_seconds * 3 + tolerance * 2
 
     with connect() as conn:
         if not table_exists(conn, "detections", "alerts"):
@@ -109,19 +147,19 @@ def main() -> int:
             return 1
 
         with conn.cursor() as cur:
-            cur.execute(GROUND_TRUTH_SQL, {"hours": args.hours})
+            cur.execute(GROUND_TRUTH_SQL, {"lookback_seconds": lookback_seconds})
             attacks = cur.fetchall()
 
         with conn.cursor() as cur:
-            cur.execute(ALERTS_SQL, {"hours": args.hours})
+            cur.execute(ALERTS_SQL, {"window_seconds": window_seconds})
             alerts = cur.fetchall()
 
         if not attacks:
-            print(f"No labelled attacks in the last {args.hours}h. "
+            print(f"No labelled attacks in the last {window_hours * 60:.0f}m. "
                   f"Fire some: make brute-force / make adversary-on")
             return 1
 
-        print(f"Scoring window: {args.hours}h   tolerance: {args.tolerance_minutes}m")
+        print(f"Scoring window: {window_hours * 60:.0f}m   tolerance: {args.tolerance_minutes}m")
         print(f"Attack runs: {len(attacks)}   Alerts: {len(alerts)}\n")
 
         # --- match alerts to attacks -------------------------------------------------
@@ -129,7 +167,14 @@ def main() -> int:
         per_rule = defaultdict(lambda: {"tp": 0, "fp": 0})
         per_scenario = defaultdict(lambda: {"runs": 0, "detected": 0, "alerts": 0})
 
+        # Recall counts only attacks that began inside the scoring window. The wider set is
+        # loaded so alerts can be attributed correctly, not so old attacks count as missed.
+        window_start = datetime.now(timezone.utc) - timedelta(seconds=window_seconds)
+        in_window = {(a[0], a[1]) for a in attacks if a[5] >= window_start}
+
         for scenario, run_id, _technique, users, ips, started, ended, _events in attacks:
+            if (scenario, run_id) not in in_window:
+                continue
             attack_detected[(scenario, run_id)] = False
             per_scenario[scenario]["runs"] += 1
 
@@ -148,8 +193,11 @@ def main() -> int:
                 entities = (users or []) if entity_type == "user" else (ips or [])
                 if entity_id in entities and overlaps(first_seen, last_seen, started, ended, tolerance):
                     matched = True
-                    attack_detected[(scenario, run_id)] = True
-                    per_scenario[scenario]["alerts"] += 1
+                    # Only in-window attacks are being scored for recall; an older one still
+                    # legitimises the alert for precision.
+                    if (scenario, run_id) in attack_detected:
+                        attack_detected[(scenario, run_id)] = True
+                        per_scenario[scenario]["alerts"] += 1
 
             per_rule[rule_id]["tp" if matched else "fp"] += 1
 
@@ -169,7 +217,7 @@ def main() -> int:
             print(f"  {rule_id:<34} {total:>7} {counts['tp']:>5} {counts['fp']:>5} "
                   f"{fmt_pct(precision):>10}")
             rows_to_save.append({
-                "hours": args.hours, "rule_id": rule_id, "scenario": None,
+                "hours": window_hours, "rule_id": rule_id, "scenario": None,
                 "tp": counts["tp"], "fp": counts["fp"], "fn": 0,
                 "precision": precision, "recall": None, "f1": None,
                 "notes": "entity-level attribution against simulated ground truth",
@@ -186,7 +234,7 @@ def main() -> int:
             print(f"  {scenario:<26} {stats['runs']:>6} {stats['detected']:>9} "
                   f"{missed:>7} {fmt_pct(recall):>9}")
             rows_to_save.append({
-                "hours": args.hours, "rule_id": None, "scenario": scenario,
+                "hours": window_hours, "rule_id": None, "scenario": scenario,
                 "tp": stats["detected"], "fp": 0, "fn": missed,
                 "precision": None, "recall": recall, "f1": None,
                 "notes": "run-level recall",
